@@ -1,0 +1,7 @@
+node_modules/
+dist/
+src-tauri/target/
+
+# tsc 误产出的 vite.config 编译产物（源文件是 vite.config.ts）
+vite.config.js
+vite.config.d.ts

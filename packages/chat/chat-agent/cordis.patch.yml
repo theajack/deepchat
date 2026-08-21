@@ -1,0 +1,71 @@
+# The dsh-chat-agent bundle patch: the desktop-surface layer over dsh-base.
+# It mounts the HTTP/API transport (webserver + api-gateway), the storage
+# stack for the chat domains, and the chat plugin family (bot registry +
+# group orchestration). No browser roster and no frontend dist: the Tauri
+# desktop app (apps/desktop) is the client and speaks plain HTTP/WS to
+# 127.0.0.1:3180.
+#
+# A patch replaces the targeted row's whole `config`, so each row below
+# restates every key it owns.
+
+# Bot personas are per-agent scoped prompt sections (chat-bots); keep the
+# base persona empty so it adds nothing beside the harness identity.
+- id: system-prompt
+  config:
+    persona: ''
+
+# The shared module-reload HMR row stays off; the desktop app reloads itself.
+- id: hmr
+  disabled: true
+
+- id: tools
+  config:
+    mode: !!js process.env.DSH_TOOLS_MODE
+
+- insert:
+    # ── storage stack for the chat domains ────────────────────────────────────
+    - id: storage
+      name: '@deepseek-ai/dsh-storage'
+
+    - id: storage-json
+      name: '@deepseek-ai/dsh-storage-json'
+      config:
+        root: !!js dshHomePath('storages')
+
+    - id: storage-domain
+      name: '@deepseek-ai/dsh-storage-domain'
+      config:
+        backend: json
+
+    # ── transport layer ───────────────────────────────────────────────────────
+    # Workspace registry + directory picker satisfy the API gateway's inject
+    # list (the desktop client never calls them, but the services must exist).
+    - id: workspace
+      name: '@deepseek-ai/dsh-workspace'
+
+    - id: directory-picker
+      name: '@deepseek-ai/dsh-host-directory-picker-auto'
+
+    # Plain route-registration carrier; the desktop app connects from the
+    # Tauri webview over loopback (trusted by the Host fence by default).
+    - id: webserver
+      name: '@deepseek-ai/dsh-host-webserver'
+      config:
+        host: '127.0.0.1'
+        port: 3180
+
+    # The API gateway: standard session/llm/credentials RPC under /api plus
+    # the server-request (respond) channel. The chat business RPC lives on
+    # /chatapi/* registered by the chat plugins themselves.
+    - id: api-gateway
+      name: '@deepseek-ai/dsh-host-apiproxy'
+
+    # ── the chat plugin family ────────────────────────────────────────────────
+    - id: chat-bots
+      name: '@deepseek-ai/dsh-chat-bots'
+
+    - id: chat-group
+      name: '@deepseek-ai/dsh-chat-group'
+      config:
+        maxGroupRounds: 3
+        contextWindow: 20

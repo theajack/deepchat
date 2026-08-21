@@ -39,3 +39,12 @@ apps/web/dist/
 worktrees/
 .agents/worktrees/
 .typert-*/
+
+*.zstd
+.dsh-home/
+
+# tsc 误在源码目录内产生的构建产物（真实构建输出在 dist/，已跟踪文件不受影响）
+packages/**/src/**/*.js
+packages/**/src/**/*.js.map
+packages/**/src/**/*.d.ts
+packages/**/src/**/*.d.ts.map

@@ -19,6 +19,10 @@ packages:
   # Deploy root of the single-exe build: a pure dependency manifest whose
   # closure is what the exe bundles and what the Python runtime distributes.
   - python/sdk-runtime
+  # chat-agent fork: in-repo DSH_HOME so the desktop profile resolves the
+  # chat bundles through real workspace links during development (see
+  # apps/desktop/README.md; production installs come from the registry).
+  - .dsh-home/profiles/*
 
 # Vendored framework packages keep their upstream semver ranges, while local
 # builds must resolve those matching names to this workspace's pinned sources.

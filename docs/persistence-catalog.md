@@ -424,6 +424,34 @@ Source: [`packages/feedback/command-feedback/src/index.ts:62`](../packages/feedb
 
 Source: [`packages/goal/goal/src/domain.ts:66`](../packages/goal/goal/src/domain.ts)
 
+### `group/*`
+
+<a id="groupbot-message--log-only"></a>
+
+#### `group/bot-message` — log-only
+
+```ts persistence-catalog
+/** One bot reply landed in the group. */
+'group/bot-message': {
+  readonly botId: string
+  readonly botName: string
+  readonly text: string
+}
+```
+
+Source: [`packages/chat/chat-group/src/types.ts:55`](../packages/chat/chat-group/src/types.ts)
+
+<a id="groupuser-message--log-only"></a>
+
+#### `group/user-message` — log-only
+
+```ts persistence-catalog
+/** A human message entered the group. */
+'group/user-message': { readonly text: string; readonly senderName: string }
+```
+
+Source: [`packages/chat/chat-group/src/types.ts:53`](../packages/chat/chat-group/src/types.ts)
+
 ### `hook/*`
 
 <a id="hookinvoked--log-only"></a>
