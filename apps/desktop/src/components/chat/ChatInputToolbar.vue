@@ -25,14 +25,26 @@ interface ToolbarAction {
   disabled?: boolean;
 }
 
-const actions = computed<ToolbarAction[]>(() => [
-  { key: "voice", title: t("toolbar.voice"), icon: Mic },
-  { key: "emoji", title: t("toolbar.emoji"), icon: SmilePlus },
-  { key: "workspace", title: t("toolbar.workspace"), icon: FolderOpen },
-  { key: "image", title: t("toolbar.image"), icon: ImagePlus },
-  { key: "file", title: t("toolbar.file"), icon: FilePlus2 },
-  { key: "search", title: t("toolbar.search"), icon: Search },
-]);
+/** 当前私聊对应的 bot（以会话 id 中的 botId 为唯一键反查） */
+const currentBot = computed(() => {
+  const c = conversations.active;
+  if (!c || c.type !== "private") return null;
+  const botId = c.id.startsWith("private:") ? c.id.slice("private:".length) : "";
+  return bots.items.find((b) => b.id === botId) ?? null;
+});
+
+const actions = computed<ToolbarAction[]>(() => {
+  // 禁用 Agent 能力的好友没有本地文件操作权限，不显示工作区按钮
+  const showWorkspace = currentBot.value?.agent_enabled !== 0;
+  return [
+    { key: "voice", title: t("toolbar.voice"), icon: Mic },
+    { key: "emoji", title: t("toolbar.emoji"), icon: SmilePlus },
+    ...(showWorkspace ? [{ key: "workspace", title: t("toolbar.workspace"), icon: FolderOpen }] : []),
+    { key: "image", title: t("toolbar.image"), icon: ImagePlus },
+    { key: "file", title: t("toolbar.file"), icon: FilePlus2 },
+    { key: "search", title: t("toolbar.search"), icon: Search },
+  ];
+});
 
 const conversations = useConversationsStore();
 const messages = useMessagesStore();
@@ -43,18 +55,23 @@ onMounted(() => {
   if (!models.loaded) void models.load();
 });
 
-/** 私聊好友已删除（bots 中找不到同名好友）→ 所有按钮灰显禁用 */
+/** 私聊会话 id（private:{botId}）→ botId */
+function botIdOf(c: { id: string }): string {
+  return c.id.startsWith("private:") ? c.id.slice("private:".length) : "";
+}
+
+/** 私聊好友已删除（bots 中找不到该 id 好友）→ 所有按钮灰显禁用 */
 const botDeleted = computed(() => {
   const c = conversations.active;
   if (!c || c.type !== "private") return false;
-  return !bots.items.some((b) => b.name === c.name);
+  return !bots.items.some((b) => b.id === botIdOf(c));
 });
 
 /** 私聊：当前 AI 好友模型的上下文占用（圆环显示在终止按钮前） */
 const ctxUsage = computed(() => {
   const c = conversations.active;
   if (!c || c.type !== "private") return null;
-  const bot = bots.items.find((b) => b.name === c.name);
+  const bot = bots.items.find((b) => b.id === botIdOf(c));
   if (!bot) return null;
   const model = bot.model_id ? models.items.find((m) => m.id === bot.model_id) : null;
   const modelName = model?.model_name ?? "";

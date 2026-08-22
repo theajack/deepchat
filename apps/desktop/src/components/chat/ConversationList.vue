@@ -81,10 +81,11 @@ function onMenuSelect(key: string) {
   }
 }
 
-/** 私聊会话对应的 bot（通过名称匹配），用于展示 agent 能力图标 */
-function botOf(conv: { type: string; name: string }) {
+/** 私聊会话对应的 bot（以会话 id 中的 botId 为唯一键反查），用于展示 agent 能力图标 */
+function botOf(conv: { type: string; id: string }) {
   if (conv.type !== "private") return null;
-  return bots.items.find((b) => b.name === conv.name) ?? null;
+  const botId = conv.id.startsWith("private:") ? conv.id.slice("private:".length) : "";
+  return bots.items.find((b) => b.id === botId) ?? null;
 }
 
 /** 会话项 hover：私聊 AI 好友显示详情浮层（全局单例） */
@@ -141,7 +142,7 @@ const filtered = computed(() => {
         <Plus :size="15" />
       </button>
     </div>
-    <div class="flex-1 overflow-y-auto pb-2.5">
+    <div class="overscroll-contain flex-1 overflow-y-auto pb-2.5">
       <div v-if="filtered.length === 0" class="px-4 py-10 text-center text-xs text-lo">
         {{ conversations.chatList.length === 0 ? t("conv.empty") : t("conv.noMatch") }}
       </div>

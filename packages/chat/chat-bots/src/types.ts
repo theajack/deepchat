@@ -38,6 +38,8 @@ export interface BotRecord {
   readonly deletedAt?: number | undefined
   /** Bot self-introduction line (conversation list subtitle). */
   readonly introduction?: string | undefined
+  /** Explicit agent-capability switch (UI level; the workspace may exist regardless). */
+  readonly agentEnabled?: boolean | undefined
   /** Per-bot agent workspace directory, when agent mode is on. */
   readonly workspaceDir?: string | undefined
   readonly createdAt: number

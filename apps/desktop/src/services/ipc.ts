@@ -130,6 +130,8 @@ function fromFrontBotInput(input: Record<string, unknown>): Record<string, unkno
     name: String(input.name ?? ''),
     avatar: input.avatar == null ? undefined : String(input.avatar),
     persona: input.persona == null ? '' : String(input.persona),
+    introduction: input.introduction == null ? undefined : String(input.introduction),
+    agentEnabled: Number(input.agent_enabled ?? 0) === 1,
     provider: input.model_provider == null ? undefined : String(input.model_provider),
     model: input.model_name == null ? undefined : String(input.model_name),
     trigger: fromFrontTrigger(input.trigger_config as Record<string, unknown> | undefined),

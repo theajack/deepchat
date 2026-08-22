@@ -306,6 +306,7 @@ class PromptLayer implements ScopeLayer {
   readonly contexts: NamedEntries<PromptContext>
   readonly runtimeContextSuppressors = new AnonymousEntries<true>()
   readonly toolProviders = new AnonymousEntries<ToolProvider>()
+  readonly toolSuppressors = new AnonymousEntries<true>()
   readonly variables: NamedEntries<VariableProvider>
 
   /**
@@ -330,6 +331,7 @@ class PromptLayer implements ScopeLayer {
       && this.contexts.isEmpty()
       && this.runtimeContextSuppressors.isEmpty()
       && this.toolProviders.isEmpty()
+      && this.toolSuppressors.isEmpty()
       && this.variables.isEmpty()
   }
 }
@@ -421,6 +423,20 @@ export class SystemPrompt extends Service {
   }
 
   /**
+   * Suppress every tool schema for the calling (agent) scope: assembled
+   * requests carry NO tools array, so the model cannot even attempt tool
+   * calls (chat-agent fork: companions with agent capabilities off).
+   * @returns the exact Cordis effect disposer.
+   */
+  suppressTools(): () => void {
+    return this.layers.effect(
+      this.ctx,
+      layer => layer.toolSuppressors.append(true),
+      { label: 'systemPrompt.suppressTools()' },
+    )
+  }
+
+  /**
    * Register a tool-schema provider in the calling context's scope. Global and
    * matching scoped providers both contribute; returning the reserved
    * {@link TOOL_ORDER_REST} name makes assembly fail.
@@ -469,6 +485,8 @@ export class SystemPrompt extends Service {
     const scopeLayers = this.layers.chainLayers(scope)
     const runtimeContextSuppressed = !this.layers.global.runtimeContextSuppressors.isEmpty()
       || scopeLayers.some(layer => !layer.runtimeContextSuppressors.isEmpty())
+    const toolsSuppressed = !this.layers.global.toolSuppressors.isEmpty()
+      || scopeLayers.some(layer => !layer.toolSuppressors.isEmpty())
     // Scoped variables shadow globals.
     const variables: Record<string, string | undefined> = {}
     for (const [name, provider] of this.layers.global.variables.entries()) {
@@ -526,7 +544,9 @@ export class SystemPrompt extends Service {
             name: entry.name,
             text: typeof entry.text === 'function' ? entry.text(context) : entry.text,
           })),
-      tools: orderTools(collected, this.toolOrder, knownNames),
+      tools: toolsSuppressed
+        ? []
+        : orderTools(collected, this.toolOrder, knownNames),
       variables,
     }
     const transformed = await this.ctx.waterfall(

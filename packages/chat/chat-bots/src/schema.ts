@@ -25,6 +25,7 @@ export const botRecordSchema = z.object({
   sessionId: z.string().transform(SessionId),
   deletedAt: z.number().int().nonnegative().optional(),
   introduction: z.string().optional(),
+  agentEnabled: z.boolean().optional(),
   workspaceDir: z.string().optional(),
   createdAt: z.number().int().nonnegative(),
   updatedAt: z.number().int().nonnegative(),

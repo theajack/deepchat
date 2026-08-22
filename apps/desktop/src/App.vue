@@ -60,7 +60,8 @@ onMounted(async () => {
   <LlmTraceView v-else-if="isLlmTraceWindow" />
 
   <!-- 主窗口 -->
-  <div v-else class="flex h-full flex-col overflow-hidden">
+  <!-- overscroll-behavior: contain 阻止 macOS 弹性滚动穿透到外层（避免 UI 被拽出边界） -->
+  <div v-else class="overscroll-contain flex h-full flex-col overflow-hidden">
     <TitleBar />
     <div class="flex min-h-0 flex-1">
       <NavSidebar />

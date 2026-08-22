@@ -64,11 +64,12 @@ const listRef = ref<HTMLElement | null>(null);
 
 const conv = computed(() => conversations.active);
 
-/** 私聊好友已删除（bots 中找不到同名好友）→ 禁止输入 */
+/** 私聊好友已删除（bots 中找不到该 id 好友）→ 禁止输入 */
 const botDeleted = computed(() => {
   const c = conv.value;
   if (!c || c.type !== "private") return false;
-  return !bots.items.some((b) => b.name === c.name);
+  const botId = c.id.startsWith("private:") ? c.id.slice("private:".length) : "";
+  return !bots.items.some((b) => b.id === botId);
 });
 
 const placeholder = computed(() => {
@@ -135,7 +136,8 @@ function onInput() {
 async function resolveBotWorkspaceDir(): Promise<string | null> {
   const conv = conversations.active;
   if (!conv || conv.type !== "private") return null;
-  const bot = bots.items.find((b) => b.name === conv.name);
+  const botId = conv.id.startsWith("private:") ? conv.id.slice("private:".length) : "";
+  const bot = bots.items.find((b) => b.id === botId);
   if (!bot) return null;
   if (bot.workspace_dir) return bot.workspace_dir;
   // 默认：~/chat-agent-workspace/agents/{botId}

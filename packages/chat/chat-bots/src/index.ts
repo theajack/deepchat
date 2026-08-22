@@ -302,9 +302,12 @@ export class ChatBots extends Service {
 
     const modelChanged = patch.provider !== undefined || patch.model !== undefined
     const personaChanged = patch.persona !== undefined && patch.persona !== current.persona
+    // Agent 开关在 setup（agent 级 tools.guard）中生效，切换必须重建 agent
+    const effectiveAgentEnabled = current.agentEnabled ?? current.workspaceDir !== undefined
+    const agentToggleChanged = patch.agentEnabled !== undefined && Boolean(patch.agentEnabled) !== effectiveAgentEnabled
 
     if (this.handles.has(id)) {
-      if (modelChanged) {
+      if (modelChanged || agentToggleChanged) {
         // Model/provider live in AgentOptions, fixed at creation: rebuild on
         // the same durable session identity (resume keeps the bot's memory).
         await this.rebuildAgent(id)
@@ -382,6 +385,21 @@ export class ChatBots extends Service {
       })
       // 工作区围栏：session cwd = bot 工作目录，dsh 内置沙箱（workspace-write
       // 模式）自动把全部写操作限制在该目录内，越界抛 FS_SANDBOX_DENIED。
+
+      // Agent 能力关闭（三重防线）：
+      // 1) 请求不携带任何工具 schema（模型根本不知道工具存在）
+      // 2) 提示词明确告知仅纯文本对话
+      // 3) 即便模型幻觉出工具调用，guard 拒绝执行
+      const agentEnabled = bot.agentEnabled ?? bot.workspaceDir !== undefined
+      if (!agentEnabled) {
+        agentCtx.systemPrompt.suppressTools()
+        agentCtx.systemPrompt.section({
+          name: 'chat:no-tools',
+          order: 1,
+          text: '【重要】你没有任何可调用的工具或技能（包括读写文件、执行命令、搜索等）。请直接以纯文本对话回答，不要尝试调用任何工具。',
+        })
+        agentCtx.tools.guard(() => '该好友未开启 Agent 能力，无法调用工具或技能')
+      }
     }
     // A persisted session (restart) resumes with its durable memory intact;
     // a fresh bot has none yet, so the resume falls back to creation.
@@ -513,6 +531,7 @@ export class ChatBots extends Service {
         avatar: typeof raw.avatar === 'string' ? raw.avatar : undefined,
         persona: typeof raw.persona === 'string' ? raw.persona : '',
         introduction: typeof raw.introduction === 'string' ? raw.introduction : undefined,
+        agentEnabled: typeof raw.agentEnabled === 'boolean' ? raw.agentEnabled : undefined,
         workspaceDir: typeof raw.workspaceDir === 'string' ? raw.workspaceDir : undefined,
         provider: typeof raw.provider === 'string' ? raw.provider : 'deepseek',
         model: typeof raw.model === 'string' ? raw.model : '',
@@ -754,7 +773,10 @@ export class ChatBots extends Service {
           const enrich = (bot: BotRecord): Record<string, unknown> => ({
             ...bot,
             modelId: this.models?.list().find(model => routeIdFor(model.id) === bot.provider)?.id ?? null,
-            agentEnabled: bot.workspaceDir !== undefined ? 1 : 0,
+            // 显式开关优先；旧记录（无该字段）回退为按 workspaceDir 推导
+            agentEnabled: bot.agentEnabled === undefined
+              ? (bot.workspaceDir !== undefined ? 1 : 0)
+              : bot.agentEnabled ? 1 : 0,
           })
 
           if (botId === undefined) {

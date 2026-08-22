@@ -177,7 +177,7 @@ watch(
 </script>
 
 <template>
-  <div ref="bodyRef" class="flex flex-1 flex-col overflow-y-auto py-2.5 pb-5">
+  <div ref="bodyRef" class="overscroll-contain flex flex-1 flex-col overflow-y-auto py-2.5 pb-5">
     <template v-for="row in rows" :key="row.key">
       <div v-if="row.type === 'time'" class="my-2 flex items-center justify-center gap-3">
         <span class="h-px w-10 bg-gradient-to-r from-transparent to-line-strong" />

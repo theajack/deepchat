@@ -30,7 +30,9 @@ onMounted(() => {
 const currentBot = computed<Bot | null>(() => {
   const c = conv.value;
   if (!c || c.type !== "private") return null;
-  return bots.items.find((b) => b.name === c.name) ?? null;
+  // 以会话 id（private:{botId}）为唯一键反查，同名好友不再串头像
+  const botId = c.id.startsWith("private:") ? c.id.slice("private:".length) : "";
+  return bots.items.find((b) => b.id === botId) ?? null;
 });
 
 /** 当前 AI 好友使用的模型信息：优先模型配置名，回退到实际模型名 */

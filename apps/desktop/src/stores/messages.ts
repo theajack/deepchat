@@ -232,6 +232,9 @@ export const useMessagesStore = defineStore('messages', () => {
           const arr = toolCalls.value[d.draftId] ?? []
           const t = arr.find(x => x.id === d.id)
           if (t) {
+            // 该调用可能已由更早的 tool.args 增量帧创建（那时 name 为空），
+            // 此处是权威来源：回填 name 与 args
+            if (d.name) t.name = d.name
             if (d.args !== undefined) t.args = d.args
           } else {
             arr.push({ id: d.id, name: d.name, args: d.args, status: 'running' })

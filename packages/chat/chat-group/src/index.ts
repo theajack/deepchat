@@ -27,6 +27,8 @@ import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { Session, SessionId } from '@deepseek-ai/dsh-session'
 // Side-effect type import: pulls in the `webServer` Context augmentation.
 import type {} from '@deepseek-ai/dsh-host-webserver'
+// Side-effect type import: pulls in the `tools` Context augmentation.
+import type {} from '@deepseek-ai/dsh-tools'
 import { defineDomain, domainTable } from '@deepseek-ai/dsh-storage-domain'
 import type { Domain } from '@deepseek-ai/dsh-storage-domain'
 import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
@@ -391,6 +393,18 @@ export class ChatGroup extends Service {
       })
       // 工作区围栏：session cwd = bot 工作目录，dsh 内置沙箱（workspace-write）
       // 自动限制全部写操作；群聊沿用 bot 自己的工作区（旧版语义）。
+
+      // Agent 能力关闭（三重防线）：无工具 schema + 提示词告知 + guard 兜底
+      const agentEnabled = bot.agentEnabled ?? bot.workspaceDir !== undefined
+      if (!agentEnabled) {
+        agentCtx.systemPrompt.suppressTools()
+        agentCtx.systemPrompt.section({
+          name: 'chat:no-tools',
+          order: 1,
+          text: '【重要】你没有任何可调用的工具或技能（包括读写文件、执行命令、搜索等）。请直接以纯文本对话回答，不要尝试调用任何工具。',
+        })
+        agentCtx.tools.guard(() => '该好友未开启 Agent 能力，无法调用工具或技能')
+      }
     }
     let handle: AgentHandle
     try {
