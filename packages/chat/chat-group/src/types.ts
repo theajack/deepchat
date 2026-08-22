@@ -42,6 +42,18 @@ export interface GroupMessageView {
   readonly senderId: string
   readonly senderName: string
   readonly text: string
+  readonly segments?: Array<{ type: 'reasoning' | 'text' | 'tool'; content: string; toolId?: string }>
+  readonly toolCalls?: Array<{
+    id: string
+    name: string
+    args?: unknown
+    result?: { content?: Array<{ type: string; text?: string }>; isError?: boolean }
+    isError?: boolean
+  }>
+  readonly promptTokens?: number
+  readonly completionTokens?: number
+  readonly cachedTokens?: number
+  readonly durationMs?: number
 }
 
 /**
@@ -53,11 +65,23 @@ declare module '@deepseek-ai/dsh-session/types' {
   interface SessionEventMap {
     /** A human message entered the group. */
     'group/user-message': { readonly text: string; readonly senderName: string }
-    /** One bot reply landed in the group. */
+    /** One bot reply landed in the group (with the run's aggregate stats). */
     'group/bot-message': {
       readonly botId: string
       readonly botName: string
       readonly text: string
+      readonly promptTokens?: number
+      readonly completionTokens?: number
+      readonly cachedTokens?: number
+      readonly durationMs?: number
+      readonly segments?: Array<{ type: 'reasoning' | 'text' | 'tool'; content: string; toolId?: string }>
+      readonly toolCalls?: Array<{
+        id: string
+        name: string
+        args?: unknown
+        result?: { content?: Array<{ type: string; text?: string }>; isError?: boolean }
+        isError?: boolean
+      }>
     }
   }
 }

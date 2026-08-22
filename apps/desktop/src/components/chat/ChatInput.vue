@@ -8,6 +8,8 @@ import { useModelsStore } from "../../stores/models";
 import { agentApi } from "../../services/agentApi";
 import { chatApi } from "../../services/chatApi";
 import ChatInputToolbar from "./ChatInputToolbar.vue";
+import Avatar from "../common/Avatar.vue";
+import BotAgentBadge from "../contacts/BotAgentBadge.vue";
 import type { Bot } from "../../types";
 import { t } from "../../i18n";
 
@@ -296,12 +298,17 @@ function onKeydown(e: KeyboardEvent) {
           @mousemove="!member.deleted && (activeIndex = i)"
           @mousedown.prevent="!member.deleted && applyMention(member)"
         >
-          <span
-            class="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-accent/25 to-accent-deep/25 text-[12px] font-semibold text-accent"
-            :class="member.deleted ? 'grayscale' : ''"
-          >{{ member.name.slice(0, 1) }}</span>
+          <div
+            class="flex h-7 w-7 shrink-0 items-center justify-center"
+            :class="member.deleted ? 'opacity-40 grayscale' : ''"
+          >
+            <Avatar :name="member.name" :src="member.avatar ?? null" :size="28" :radius="8" />
+          </div>
           <span class="min-w-0 flex-1">
-            <span class="block truncate text-[13px] font-medium text-hi" :class="member.deleted ? 'line-through decoration-lo/60' : ''">{{ member.name }}</span>
+            <span class="flex items-center gap-1">
+              <span class="truncate text-[13px] font-medium text-hi" :class="member.deleted ? 'line-through decoration-lo/60' : ''">{{ member.name }}</span>
+              <BotAgentBadge v-if="member.agent_enabled === 1 && !member.deleted" :agent-enabled="1" :size="12" class="shrink-0" />
+            </span>
             <span class="block truncate text-[11px] text-mid">{{ member.deleted ? t("chat.botDeleted") : modelName(member) }}</span>
           </span>
           <span

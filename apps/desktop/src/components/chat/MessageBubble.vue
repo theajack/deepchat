@@ -403,14 +403,15 @@ const usageText = computed(() => {
 
 <template>
   <div
-    class="group flex items-start gap-2 px-5 py-0.5"
-    :class="[item.isSelf ? 'flex-row-reverse' : 'flex-row mb-2.5', { 'msg-in': item.animate }]"
+    class="group flex items-start gap-0 px-5 py-0.5"
+    :class="[item.isSelf ? 'flex-row-reverse' : 'flex-row mb-3', { 'msg-in': item.animate }]"
   >
     <!-- 已删除好友：灰显头像 + hover 提示「好友已删除」 -->
     <HoverTip
       v-if="!item.isSelf && item.showAvatar && senderBotDeleted"
       :content="t('chat.botDeleted')"
       placement="top"
+      class="mr-2"
     >
       <Avatar :name="item.senderName" :src="item.avatar" :size="30" class="grayscale opacity-50" />
     </HoverTip>
@@ -419,13 +420,14 @@ const usageText = computed(() => {
       :name="item.senderName"
       :src="item.avatar"
       :size="30"
+      class="mr-2"
       :class="item.botId ? 'cursor-pointer transition-transform hover:scale-105' : ''"
       @mouseenter="onAvatarEnter"
       @mouseleave="onAvatarLeave"
     />
-    <Avatar v-else-if="item.isSelf && item.showAvatar" :name="t('group.self')" :src="item.selfAvatar" :size="30" />
+    <Avatar v-else-if="item.isSelf && item.showAvatar" :name="t('group.self')" :src="item.selfAvatar" :size="30" class="ml-2" />
     <div v-else class="w-7.5 shrink-0" />
-    <div class="relative max-w-[68%] min-w-[350px]" :class="item.isSelf ? 'flex flex-col items-end' : ''">
+    <div class="relative max-w-[68%]" :class="item.isSelf ? 'flex flex-col items-end' : ''">
       <div v-if="isGroup && !item.isSelf && item.showSender" class="mb-1 text-[11px] text-lo">
         {{ item.senderName }}
       </div>
@@ -567,6 +569,6 @@ const usageText = computed(() => {
         />
       </div>
     </div>
-    <span v-if="item.time" class="font-num shrink-0 px-1 text-[10px] text-lo">{{ formatTime(item.time) }}</span>
+    <span v-if="item.time" class="font-num shrink-0 text-[10px] text-lo" :class="item.isSelf ? 'mr-1.5' : 'ml-1.5'">{{ formatTime(item.time) }}</span>
   </div>
 </template>

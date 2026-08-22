@@ -305,6 +305,19 @@ export const useMessagesStore = defineStore('messages', () => {
               [msg.id]: toolCalls.value[msg.draftId],
             }
           }
+          // 群聊消息（无草稿）：直接用事件携带的 tool_calls 落表
+          else if (msg.tool_calls && msg.tool_calls.length > 0) {
+            toolCalls.value = {
+              ...toolCalls.value,
+              [msg.id]: msg.tool_calls.map(tc => ({
+                id: tc.id,
+                name: tc.name,
+                args: tc.args,
+                status: 'success',
+                result: tc.result,
+              })),
+            }
+          }
           // 缓存权威 segments：历史消息加载 / 刷新后用此渲染 timeline
           if (msg.segments) {
             segmentsCache.value[msg.id] = msg.segments

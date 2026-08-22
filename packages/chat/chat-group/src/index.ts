@@ -36,7 +36,7 @@ import { botSessionRecordSchema, groupRecordSchema } from './schema.ts'
 import { shouldRespond } from './trigger.ts'
 import type { TriggerMessage } from './trigger.ts'
 import type { GroupCreateInput, GroupMessageView, GroupRecord, GroupUpdatePatch } from './types.ts'
-import { translateSessionEvent } from '@deepseek-ai/dsh-chat-bots/bridge'
+import { aggregateLastRun, translateSessionEvent } from '@deepseek-ai/dsh-chat-bots/bridge'
 
 export type {
   GroupCreateInput,
@@ -230,7 +230,7 @@ export class ChatGroup extends Service {
         })
         return
       }
-      // group/bot-message → the durable group reply
+      // group/bot-message → the durable group reply（含该次 run 的统计）
       this.broadcast('message.created', {
         id: `g-${String(event.seq)}`,
         conversation_id: group.id,
@@ -241,11 +241,12 @@ export class ChatGroup extends Service {
         content_type: 'text',
         is_self: 0,
         created_at: event.time,
-        segments: [{ type: 'text', content: event.data.text }],
-        prompt_tokens: 0,
-        completion_tokens: 0,
-        cached_tokens: 0,
-        duration_ms: 0,
+        segments: event.data.segments ?? [{ type: 'text', content: event.data.text }],
+        tool_calls: event.data.toolCalls,
+        prompt_tokens: event.data.promptTokens ?? 0,
+        completion_tokens: event.data.completionTokens ?? 0,
+        cached_tokens: event.data.cachedTokens ?? 0,
+        duration_ms: event.data.durationMs ?? 0,
         stop_reason: '',
       })
       this.broadcast('conversation.updated', {
@@ -499,7 +500,35 @@ export class ChatGroup extends Service {
 
     const text = lastAssistantText(agent.session)
     if (text === null) return null
-    container.session.append('group/bot-message', { botId: bot.id, botName: bot.name, text })
+    // 聚合该次 run 的统计（usage/segments/工具调用/时长）随事件落库，
+    // 群聊气泡的统计行与刷新后的历史渲染都从这里取
+    const run = aggregateLastRun(agent.session, bot.id, bot.name)
+    const appendData: {
+      botId: string
+      botName: string
+      text: string
+      promptTokens?: number
+      completionTokens?: number
+      cachedTokens?: number
+      durationMs?: number
+      segments?: Array<{ type: 'reasoning' | 'text' | 'tool'; content: string; toolId?: string }>
+      toolCalls?: Array<{
+        id: string
+        name: string
+        args?: unknown
+        result?: { content?: Array<{ type: string; text?: string }>; isError?: boolean }
+        isError?: boolean
+      }>
+    } = { botId: bot.id, botName: bot.name, text }
+    if (run !== undefined) {
+      appendData.promptTokens = run.promptTokens
+      appendData.completionTokens = run.completionTokens
+      appendData.cachedTokens = run.cachedTokens
+      appendData.durationMs = run.durationMs
+      appendData.segments = run.segments
+      appendData.toolCalls = run.toolCalls
+    }
+    container.session.append('group/bot-message', appendData)
     this.lastSpoke.set(bot.id, Date.now())
     return { senderId: bot.id, senderName: bot.name, text }
   }
@@ -694,6 +723,12 @@ function renderHistory(session: Session): GroupMessageView[] {
         senderId: event.data.botId,
         senderName: event.data.botName,
         text: event.data.text,
+        ...(event.data.segments !== undefined ? { segments: event.data.segments } : {}),
+        ...(event.data.toolCalls !== undefined ? { toolCalls: event.data.toolCalls } : {}),
+        ...(event.data.promptTokens !== undefined ? { promptTokens: event.data.promptTokens } : {}),
+        ...(event.data.completionTokens !== undefined ? { completionTokens: event.data.completionTokens } : {}),
+        ...(event.data.cachedTokens !== undefined ? { cachedTokens: event.data.cachedTokens } : {}),
+        ...(event.data.durationMs !== undefined ? { durationMs: event.data.durationMs } : {}),
       })
     }
   }

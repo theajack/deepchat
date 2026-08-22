@@ -344,6 +344,34 @@ export function aggregatePrompt(session: Session, promptSeq: number, botId: stri
   }
 }
 
+/** The turn number of the last `turn/end` event, or -1 (for group stats). */
+export function lastTurnOf(session: Session): number {
+  for (let i = session.events.length - 1; i >= 0; i--) {
+    const event = session.events[i]
+    if (event !== undefined && event.type === 'turn/end') return eventTurn(event)
+  }
+  return -1
+}
+
+/** The end-time of the last `turn/end` event, or 0. */
+export function lastTurnEndTime(session: Session): number {
+  for (let i = session.events.length - 1; i >= 0; i--) {
+    const event = session.events[i]
+    if (event !== undefined && event.type === 'turn/end') return event.time
+  }
+  return 0
+}
+
+/**
+ * Aggregate the bot's latest completed run into a rich chat row. Group chat
+ * appends this payload into the container event so bubbles carry stats.
+ */
+export function aggregateLastRun(session: Session, botId: string, botName: string): ChatMessageRow | undefined {
+  const turn = lastTurnOf(session)
+  if (turn < 0) return undefined
+  return aggregateTurn(session, turn, lastTurnEndTime(session), botId, botName)
+}
+
 /**
  * Project a private-chat session log into rich chat rows: human prompts only
  * (plugin relays, wake notices and system reminders stay hidden) plus ONE
