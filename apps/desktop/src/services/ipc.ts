@@ -36,6 +36,9 @@ interface DshBot {
   agentEnabled?: number
   introduction?: string | null
   workspaceDir?: string | null
+  enabledTools?: string[]
+  enabledSkills?: string[]
+  enabledMcpServers?: string[]
   deletedAt?: number | null
   trigger: DshTrigger
   sessionId: string
@@ -114,10 +117,10 @@ function toFrontBot(bot: DshBot): FrontBot {
     model_id: bot.modelId ?? null,
     agent_enabled: bot.agentEnabled ?? 0,
     workspace_dir: bot.workspaceDir ?? null,
-    enabled_tools: [],
+    enabled_tools: bot.enabledTools ?? [],
     skill_dirs: [],
-    enabled_skills: [],
-    enabled_mcp_servers: [],
+    enabled_skills: bot.enabledSkills ?? [],
+    enabled_mcp_servers: bot.enabledMcpServers ?? [],
     max_turns: 0,
     approval_policy: '',
     created_at: bot.createdAt,
@@ -126,6 +129,11 @@ function toFrontBot(bot: DshBot): FrontBot {
 }
 
 function fromFrontBotInput(input: Record<string, unknown>): Record<string, unknown> {
+  const toArray = (value: unknown): string[] | undefined =>
+    Array.isArray(value) ? value.map(String) : undefined
+  const enabledTools = toArray(input.enabled_tools)
+  const enabledSkills = toArray(input.enabled_skills)
+  const enabledMcpServers = toArray(input.enabled_mcp_servers)
   return {
     name: String(input.name ?? ''),
     avatar: input.avatar == null ? undefined : String(input.avatar),
@@ -135,6 +143,9 @@ function fromFrontBotInput(input: Record<string, unknown>): Record<string, unkno
     provider: input.model_provider == null ? undefined : String(input.model_provider),
     model: input.model_name == null ? undefined : String(input.model_name),
     trigger: fromFrontTrigger(input.trigger_config as Record<string, unknown> | undefined),
+    ...(enabledTools !== undefined ? { enabledTools } : {}),
+    ...(enabledSkills !== undefined ? { enabledSkills } : {}),
+    ...(enabledMcpServers !== undefined ? { enabledMcpServers } : {}),
   }
 }
 
@@ -361,7 +372,15 @@ export class DshTransport implements IpcTransport {
       } as T
     }
     if (method === 'message.stop') {
-      // TODO(M5): 映射到标准 RPC session.cancel
+      const conversationId = String(params.conversationId ?? '')
+      if (conversationId.startsWith('private:')) {
+        // 私聊：终止该好友 agent 的当前生成 turn
+        return await dshSend<T>('POST', `/chatapi/bots/${conversationId.slice('private:'.length)}/stop`)
+      }
+      if (conversationId.startsWith('group:')) {
+        // 群聊：终止容器编排 + 全部成员 bot agent
+        return await dshSend<T>('POST', `/chatapi/groups/${conversationId.slice('group:'.length)}/stop`)
+      }
       return { ok: true, stopped: false } as T
     }
     if (method === 'message.clear') {
@@ -433,6 +452,9 @@ export class DshTransport implements IpcTransport {
       const { dir } = await dshSend<{ dir: string }>('POST', '/chatapi/misc', { action: 'default-workspace-dir' })
       return dir as T
     }
+    if (method === 'settings.dataDirs') {
+      return await dshSend<T>('POST', '/chatapi/misc', { action: 'data-dirs' })
+    }
 
     // ── 技能：dsh skill 注册表（bundled + $DSH_HOME/skills + project）──
     if (method === 'skill.list') {
@@ -453,14 +475,25 @@ export class DshTransport implements IpcTransport {
         skillFilter: params.skillFilter,
       })
     }
-    if (method === 'skill.find' || method === 'skill.installGithub') {
-      // TODO(M4): GitHub 技能搜索/安装（skills.sh catalog）
-      throw new Error(NOT_MIGRATED)
+    if (method === 'skill.find') {
+      const owner = typeof params.owner === 'string' && params.owner.trim() !== '' ? params.owner.trim() : undefined
+      return await dshSend<T>('POST', '/chatapi/skills/find', {
+        query: params.query,
+        ...(owner !== undefined ? { owner } : {}),
+      })
+    }
+    if (method === 'skill.installGithub') {
+      return await dshSend<T>('POST', '/chatapi/skills/install-github', {
+        source: params.source,
+      })
     }
 
-    // ── LLM trace：M5（trace 面板），先返回空避免控制台噪音 ──
+    // ── LLM trace（调试面板「对话信息」）──
     if (method === 'llm.trace.list') {
-      return { items: [] } as T
+      return await dshSend<T>('GET', '/chatapi/llm-trace')
+    }
+    if (method === 'llm.trace.clear') {
+      return await dshSend<T>('DELETE', '/chatapi/llm-trace')
     }
 
     // ── persona 生成：M4（chat-persona-gen 插件）──

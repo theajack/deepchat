@@ -66,7 +66,7 @@ async function install(s: SkillSearchResult) {
   installingSlug.value = s.slug;
   installError.value[s.slug] = "";
   try {
-    const res = await agentApi.skillInstallGithub(`${s.source}@${s.name}`);
+    const res = await agentApi.skillInstallGithub(`${s.source || s.slug}@${s.name}`);
     locallyInstalledSlugs.value.add(s.slug);
     // 安装后立即刷新已安装 source 集合
     await refreshInstalledSources();

@@ -9,7 +9,7 @@ export const en: MessageDict = {
   'general.browser': 'Browser opening mode',
   'general.browserDesc': 'Choose the default way to open links, applied globally',
   'general.dataDir': 'Data directory',
-  'general.dataDirDesc': 'All data is stored under ~/chat-agent-workspace with the following structure:',
+  'general.dataDirDesc': 'All data is stored under the app data root (dsh-home) with the following structure:',
 
   // Theme
   'theme.light': 'Light',
@@ -28,11 +28,11 @@ export const en: MessageDict = {
   'browser.systemDesc': 'Open with the operating system default browser',
 
   // Data directory
-  'dataDir.databaseDesc': 'Database',
-  'dataDir.agentsDesc': 'AI friends workspace',
-  'dataDir.skillsDesc': 'Skill files',
-  'dataDir.configDesc': 'Config files',
-  'dataDir.logsDesc': 'Runtime logs',
+  'dataDir.databaseDesc': 'Data store (bots, groups, model records)',
+  'dataDir.agentsDesc': "AI friends' workspaces",
+  'dataDir.groupsDesc': 'Group workspaces',
+  'dataDir.sessionsDesc': 'Session logs (zstd-compressed)',
+  'dataDir.skillsDesc': 'User-installed skills',
   'dataDir.root': 'Root path: ',
   'dataDir.openFailed': 'Failed to open directory',
 

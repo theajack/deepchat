@@ -36,6 +36,18 @@
   config:
     mode: !!js process.env.DSH_TOOLS_MODE
 
+# Search: the composite chat provider replaces the stock DeepSeek-only row —
+# DeepSeek native search when the Models-page key exists, keyless DuckDuckGo
+# Lite otherwise, Bing HTML as the final fallback. Pin the seam to its id so
+# the (now disabled) deepseek-official registration never makes selection
+# ambiguous.
+- id: web
+  config:
+    searchProvider: chat-search
+
+- id: web-search-deepseek
+  disabled: true
+
 - insert:
     # ── storage stack for the chat domains ────────────────────────────────────
     - id: storage
@@ -77,6 +89,10 @@
     # ── the chat plugin family ────────────────────────────────────────────────
     - id: chat-bots
       name: '@deepseek-ai/dsh-chat-bots'
+
+    # Composite search provider (deepseek → duckduckgo → bing degradations).
+    - id: chat-web-search
+      name: '@deepseek-ai/dsh-chat-web-search'
 
     - id: chat-group
       name: '@deepseek-ai/dsh-chat-group'

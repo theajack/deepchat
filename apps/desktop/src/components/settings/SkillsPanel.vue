@@ -64,7 +64,7 @@ onMounted(load);
 </script>
 
 <template>
-  <div class="flex flex-col gap-3">
+  <div class="flex min-w-0 flex-col gap-3">
     <!-- 首行：计数 + 添加/刷新按钮 -->
     <div class="flex items-center justify-between">
       <span class="text-[12px] text-lo">
@@ -91,9 +91,9 @@ onMounted(load);
     </div>
 
     <!-- 技能列表 -->
-    <div v-else-if="skills.length" class="grid gap-2">
+    <div v-else-if="skills.length" class="grid grid-cols-1 gap-2">
       <div v-for="s in skills" :key="s.name"
-        class="rounded-xl border border-line bg-ink-3/40 transition-colors hover:border-line-strong">
+        class="min-w-0 rounded-xl border border-line bg-ink-3/40 transition-colors hover:border-line-strong">
         <div class="flex items-start gap-2.5 p-2.5">
           <BookOpen :size="14" class="mt-0.5 shrink-0 text-accent" />
           <div class="min-w-0 flex-1">
@@ -111,10 +111,8 @@ onMounted(load);
               <span v-if="s.disableModelInvocation"
                 class="rounded bg-ink-1 px-1.5 py-0.5 text-[10px] text-lo">{{ t("skills.manualOnly") }}</span>
             </div>
-            <p class="mt-0.5 line-clamp-2 text-[11.5px] text-mid">{{ s.description }}</p>
-            <div class="mt-1 flex items-center gap-2">
-              <p class="truncate font-mono text-[10px] text-lo">{{ s.location }}</p>
-            </div>
+            <p class="mt-0.5 line-clamp-2 break-words text-[11.5px] leading-snug text-mid">{{ s.description }}</p>
+            <p class="mt-1 truncate font-mono text-[10px] text-lo">{{ s.location }}</p>
           </div>
           <!-- 操作按钮 -->
           <div class="flex shrink-0 items-center gap-1">

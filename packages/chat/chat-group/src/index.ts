@@ -23,6 +23,7 @@ import { Service } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import type { Agent, AgentHandle } from '@deepseek-ai/dsh-agent'
 import type { BotRecord } from '@deepseek-ai/dsh-chat-bots'
+import { buildBotAgentSetup, resolveEnabledSkills } from '@deepseek-ai/dsh-chat-bots'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { Session, SessionId } from '@deepseek-ai/dsh-session'
 // Side-effect type import: pulls in the `webServer` Context augmentation.
@@ -386,27 +387,10 @@ export class ChatGroup extends Service {
     }
 
     const agentOptions = { provider: bot.provider, model: bot.model }
-    const setup = (agentCtx: Context): void => {
-      agentCtx.systemPrompt.section({
-        name: 'chat:persona',
-        order: 0,
-        text: bot.persona,
-      })
-      // 工作区围栏：session cwd = bot 工作目录，dsh 内置沙箱（workspace-write）
-      // 自动限制全部写操作；群聊沿用 bot 自己的工作区（旧版语义）。
-
-      // Agent 能力关闭（三重防线）：无工具 schema + 提示词告知 + guard 兜底
-      const agentEnabled = bot.agentEnabled ?? bot.workspaceDir !== undefined
-      if (!agentEnabled) {
-        agentCtx.systemPrompt.suppressTools()
-        agentCtx.systemPrompt.section({
-          name: 'chat:no-tools',
-          order: 1,
-          text: '【重要】你没有任何可调用的工具或技能（包括读写文件、执行命令、搜索等）。请直接以纯文本对话回答，不要尝试调用任何工具。',
-        })
-        agentCtx.tools.guard(() => '该好友未开启 Agent 能力，无法调用工具或技能')
-      }
-    }
+    // 与私聊共用同一套能力装配：persona、Agent 开关三重防线、工具白名单、
+    // 启用技能目录 + scoped `skill` 工具（群聊沿用 bot 自己的工作区围栏）。
+    const skillSummaries = await resolveEnabledSkills(this.ctx, bot)
+    const setup = buildBotAgentSetup(this.ctx, bot, skillSummaries)
     let handle: AgentHandle
     try {
       handle = await this.ctx.agents.resume({ resumeSessionId: binding.sessionId, agentOptions, setup })
@@ -625,6 +609,27 @@ export class ChatGroup extends Service {
             // 通知前端清除该会话的全部本地状态（含流式残留）
             this.ctx.chatBots.broadcast('message.cleared', { conversationId: groupId })
             return json(res, 200, { cleared: true })
+          }
+
+          if (action === '/stop') {
+            if (req.method !== 'POST') return json(res, 405, { error: 'method not allowed' })
+            // 取消容器 agent（编排循环）与该群全部成员 bot agent（各自的
+            // 生成 turn），清空后续轮次调度
+            let stopped = false
+            const container = this.containers.get(groupId)?.agent
+            if (container !== undefined && container.status === 'running') {
+              container.cancel({ kind: 'user' })
+              stopped = true
+            }
+            for (const [key, entry] of this.botAgents) {
+              if (!key.startsWith(`${groupId}:`)) continue
+              const agent = entry.handle.agent
+              if (agent.status === 'running') {
+                agent.cancel({ kind: 'user' })
+                stopped = true
+              }
+            }
+            return json(res, 200, { ok: true, stopped })
           }
 
           if (action === '/send') {

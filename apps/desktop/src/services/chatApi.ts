@@ -87,6 +87,10 @@ export class ChatApi {
   getDefaultWorkspaceDir(): Promise<string> {
     return this.t.request('settings.defaultWorkspaceDir')
   }
+  /** 设置页「数据目录」：dsh home 下真实存在的存储位置清单。 */
+  dataDirs(): Promise<{ root: string; dirs: Array<{ name: string; path: string }> }> {
+    return this.t.request('settings.dataDirs')
+  }
 
   generatePersona(
     input: { name: string; partial?: string; model_provider?: string; model_name?: string; model_id?: string | null },

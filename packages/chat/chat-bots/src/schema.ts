@@ -27,6 +27,9 @@ export const botRecordSchema = z.object({
   introduction: z.string().optional(),
   agentEnabled: z.boolean().optional(),
   workspaceDir: z.string().optional(),
+  enabledTools: z.array(z.string()).optional(),
+  enabledSkills: z.array(z.string()).optional(),
+  enabledMcpServers: z.array(z.string()).optional(),
   createdAt: z.number().int().nonnegative(),
   updatedAt: z.number().int().nonnegative(),
 }) satisfies z.ZodType<BotRecord>

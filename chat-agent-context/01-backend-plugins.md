@@ -10,6 +10,9 @@
 - `index.ts` — 插件主体 + HTTP 端点 + SSE + agent 生命周期
 - `bridge.ts` — 事件翻译器（详见 02）
 - `models.ts` — 自定义模型记录 + llm-pi-ai 路由同步
+- `agent-setup.ts` — **共享 agent 能力装配**（私聊/群聊两插件复用）
+- `skills-remote.ts` — skills.sh 搜索 + GitHub 安装
+- `llm-trace.ts` — LLM 调用追踪记录器（调试面板「对话信息」）
 - `schema.ts` — zod schema（botRecordSchema）
 - `types.ts` — BotRecord / BotCreateInput / BotUpdatePatch / TriggerConfig
 
@@ -37,6 +40,9 @@ interface BotRecord {
   introduction?: string   // 会话列表副标题
   agentEnabled?: boolean  // 显式 Agent 能力开关
   workspaceDir?: string   // workspace/agents/{botId}
+  enabledTools?: string[]   // 工具白名单（空 = 全部可用，旧版语义）
+  enabledSkills?: string[] // 技能白名单（空 = 无技能；chat bot 不吃整个开发技能目录）
+  enabledMcpServers?: string[] // MCP 白名单（仅持久化，运行时接线待迁移）
   createdAt / updatedAt
 }
 ```
@@ -57,9 +63,23 @@ interface BotRecord {
 - `/chatapi/events` — SSE 事件流（业务事件下行）
 
 **agent 生命周期**：
-- `ensureAgent(id)`：resume 失败则 create；`setup(agentCtx)` 注入 persona section + Agent 能力三重防线
+- `ensureAgent(id)`：resume 失败则 create；`setup = buildBotAgentSetup(ctx, bot, skillSummaries)`（agent-setup.ts）
 - `handles: Map<botId, AgentHandle>` 缓存
-- `update()` 在 model / persona / agentEnabled 变更时 dispose 并重建 agent
+- `update()` 在 model / persona / agentEnabled / 三个能力白名单变更时 dispose 并重建 agent；
+  部分 patch 不带白名单字段时**不得**经 record spread 抹掉已存值（update 内已做 undefined 剥离）
+
+**agent-setup.ts 能力装配**（chat-bots 与 chat-group 的 ensureBotAgent 共用）：
+1. persona prompt section（`chat:persona`）
+2. Agent 关闭三重防线（suppressTools + `chat:no-tools` section + tools.guard）
+3. 工具白名单：`agentCtx.tools.restrict({ allow })`（scoped restrict 只过滤该 agent 继承的全局工具面，
+   schema 不发给模型；本层注册的 skill 工具不受影响；名单为空 = 全部可用）
+4. 技能：`resolveEnabledSkills()` 先异步解析（setup 必须同步），命中注册
+   `chat:skills` 目录 section + scoped `skill` 工具（对齐旧版 createSkillTool + formatSkillsForPrompt）
+5. openUrl 工具（旧版 createOpenUrlTool 迁移）：scoped 注册，后端仅做
+   目标校验/归一化（http/file:// /本地路径），**打开方式由前端分流** ——
+   messages.ts 在 agent.tool.start 记录 args、tool.end 成功后调
+   utils/browser `openUrl()`，按 `default_browser` 设置走内置浏览器窗口
+   或 `tool.openUrl`（misc open-dir 系统命令）
 
 ## 2. chat-group（群聊编排）
 
@@ -80,6 +100,7 @@ export const inject = ['chatBots', 'agents', 'storageDomain', 'webServer', 'tool
 **双真源结构**（核心设计）：
 - **群容器 session**：`GroupRecord.sessionId` —— 只记群消息流（`group/user-message` + `group/bot-message`），UI 渲染/fork/导出/搜索全走它
 - **每 (群, bot) 独立 session**：`bot_sessions` 表（key = `{groupId}:{botId}`）—— bot 的群聊记忆，与私聊 session 分离
+- `ensureBotAgent` 的 setup 复用 chat-bots 导出的 `buildBotAgentSetup`（persona/三重防线/工具白名单/技能装配一致），按 botUpdatedAt 缓存
 
 **触发引擎（trigger.ts）** 优先级：
 1. `@name` → 必回（免冷却）

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Monitor, Moon, Sun, FolderOpen, Globe, AppWindow, Palette, Languages, Database, Bot, Sparkles, FileCog, ScrollText } from "lucide-vue-next";
+import { Monitor, Moon, Sun, FolderOpen, Globe, AppWindow, Palette, Languages, Database, Bot, Sparkles, ScrollText } from "lucide-vue-next";
 import { computed, onMounted, ref } from "vue";
 import { useThemeStore, type ThemeMode } from "../../stores/theme";
 import { useLocaleStore } from "../../stores/locale";
@@ -34,6 +34,7 @@ function chooseLanguage(opt: Locale) {
 }
 
 const workspaceDir = ref("");
+const dataDirPaths = ref<Record<string, string>>({});
 const browserPref = ref<BrowserPref>("builtin");
 
 const browserOptions = computed<{ value: BrowserPref; label: string; desc: string; icon: typeof Globe }[]>(() => [
@@ -42,11 +43,11 @@ const browserOptions = computed<{ value: BrowserPref; label: string; desc: strin
 ]);
 
 const dataDirs = computed<{ name: string; icon: typeof Database; desc: string }[]>(() => [
-  { name: "database", icon: Database, desc: t("dataDir.databaseDesc") },
-  { name: "agents", icon: Bot, desc: t("dataDir.agentsDesc") },
-  { name: "skills", icon: Sparkles, desc: t("dataDir.skillsDesc") },
-  { name: "config", icon: FileCog, desc: t("dataDir.configDesc") },
-  { name: "logs", icon: ScrollText, desc: t("dataDir.logsDesc") },
+  { name: "storages/", icon: Database, desc: t("dataDir.databaseDesc") },
+  { name: "workspace/agents/", icon: Bot, desc: t("dataDir.agentsDesc") },
+  { name: "workspace/groups/", icon: Bot, desc: t("dataDir.groupsDesc") },
+  { name: "sessions/", icon: ScrollText, desc: t("dataDir.sessionsDesc") },
+  { name: "skills/", icon: Sparkles, desc: t("dataDir.skillsDesc") },
 ]);
 
 async function chooseBrowser(pref: BrowserPref) {
@@ -55,9 +56,10 @@ async function chooseBrowser(pref: BrowserPref) {
 }
 
 async function openDataDir(name: string) {
-  if (!workspaceDir.value) return;
+  const dir = dataDirPaths.value[name];
+  if (!dir) return;
   try {
-    await agentApi.toolOpenDir(`${workspaceDir.value}/${name}`);
+    await agentApi.toolOpenDir(dir);
   } catch (e) {
     console.error("[general] 打开目录失败", e);
     app.toast(t("dataDir.openFailed"));
@@ -66,7 +68,9 @@ async function openDataDir(name: string) {
 
 onMounted(async () => {
   try {
-    workspaceDir.value = await chatApi.getDefaultWorkspaceDir();
+    const { root, dirs } = await chatApi.dataDirs();
+    workspaceDir.value = root;
+    dataDirPaths.value = Object.fromEntries(dirs.map((d) => [d.name, d.path]));
   } catch { /* ignore */ }
   browserPref.value = getBrowserPref();
 });
@@ -165,7 +169,7 @@ onMounted(async () => {
         @click="openDataDir(d.name)"
       >
         <component :is="d.icon" :size="13" :stroke-width="1.8" class="shrink-0 text-accent" />
-        <span class="underline decoration-dotted underline-offset-[3px] group-hover:text-accent">{{ d.name }}/</span>
+        <span class="underline decoration-dotted underline-offset-[3px] group-hover:text-accent">{{ d.name }}</span>
         <span class="text-lo">{{ d.desc }}</span>
       </button>
     </div>

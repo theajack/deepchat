@@ -20,12 +20,12 @@
 - [ ] 验证真实 LLM（用户中转站）下工具名、流式、多 turn 完整链路
 
 ### 中期（M4/M5 收尾）
-- [ ] `skill.find` / `skill.installGithub`（GitHub 技能搜索/安装，skills.sh catalog）
-- [ ] `message.stop`（终止生成）—— 对应 dsh 的 turn abort 能力
+- [x] `skill.find` / `skill.installGithub`（GitHub 技能搜索/安装，skills.sh catalog）— 已完成
+- [x] `message.stop`（终止生成）— 已完成：私聊 `POST /chatapi/bots/:id/stop` → `agent.cancel({kind:'user'})`；群聊 `POST /chatapi/groups/:id/stop` → 容器编排 + 全部成员 bot agent 一并 cancel。取消后 dsh 发 `turn/end(aborted/user)`，bridge 正常聚合部分内容并发 `done:true` 收尾
 - [ ] 群消息 usage 归属（当前群消息 usage 字段为 0）
 - [ ] persona 生成插件（chat-persona-gen，流式）
 - [ ] 审批交互：`api/respond` 双通道（`ApprovalModal` 数据源）
-- [ ] LLM trace 面板（`llm.trace.list` 目前返回空列表）
+- [x] LLM trace 面板 — 已完成：`llm-trace.ts` 监听 dsh `llm/stream` waterfall（覆盖全部模型调用），环形缓冲 50 条；`GET/DELETE /chatapi/llm-trace`；usage 求和语义（promptTokens = input + cacheRead + cacheWrite）
 
 ### 远期（M6）
 - [ ] 数据迁移脚本：旧 SQLite（bots/settings/messages）→ dsh storages + session 日志

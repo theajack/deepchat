@@ -1,0 +1,16 @@
+{
+  "extends": "../../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "src",
+    "outDir": "lib/types"
+  },
+  "include": [
+    "src"
+  ],
+  "references": [
+    { "path": "../../../vendor/cordis" },
+    { "path": "../../web/web" },
+    { "path": "../../web/web-search-deepseek" },
+    { "path": "../../credentials/credentials" }
+  ]
+}

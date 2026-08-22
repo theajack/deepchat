@@ -9,7 +9,7 @@ export const zh: MessageDict = {
   'general.browser': '浏览器打开方式',
   'general.browserDesc': '选择点击链接时的默认打开方式，全局生效',
   'general.dataDir': '数据目录',
-  'general.dataDirDesc': '所有数据统一存储在 ~/chat-agent-workspace 下，结构如下：',
+  'general.dataDirDesc': '所有数据统一存储在应用数据根目录（dsh-home）下，结构如下：',
 
   // 主题
   'theme.light': '浅色',
@@ -28,11 +28,11 @@ export const zh: MessageDict = {
   'browser.systemDesc': '使用操作系统默认浏览器打开',
 
   // 数据目录
-  'dataDir.databaseDesc': '数据库',
+  'dataDir.databaseDesc': '数据存储（好友、群聊、模型记录）',
   'dataDir.agentsDesc': 'AI 好友工作目录',
-  'dataDir.skillsDesc': '技能文件',
-  'dataDir.configDesc': '配置文件',
-  'dataDir.logsDesc': '运行日志',
+  'dataDir.groupsDesc': '群聊工作目录',
+  'dataDir.sessionsDesc': '会话日志（zstd 压缩）',
+  'dataDir.skillsDesc': '用户安装的技能',
   'dataDir.root': '根路径：',
   'dataDir.openFailed': '打开目录失败',
 

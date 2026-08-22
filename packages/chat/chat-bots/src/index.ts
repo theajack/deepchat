@@ -26,7 +26,10 @@ import type {} from '@deepseek-ai/dsh-tools'
 // Side-effect type import: pulls in the `settings`/`credentials` augmentations.
 import type {} from '@deepseek-ai/dsh-settings'
 import type {} from '@deepseek-ai/dsh-credentials'
-import { type ModelRecord, modelRecordSchema, ModelStore, removeRoute, routeIdFor, syncRoute } from './models.ts'
+import { type ModelRecord, mirrorDeepSeekCredential, modelRecordSchema, ModelStore, removeRoute, routeIdFor, syncRoute } from './models.ts'
+import { formatInstalls, installGithubSkill, searchSkillsApi } from './skills-remote.ts'
+import { buildBotAgentSetup, resolveEnabledSkills } from './agent-setup.ts'
+import { LlmTraceRecorder } from './llm-trace.ts'
 import { renderPrivateHistory, translateSessionEvent } from './bridge.ts'
 import { defineDomain, domainTable } from '@deepseek-ai/dsh-storage-domain'
 import type { Domain } from '@deepseek-ai/dsh-storage-domain'
@@ -34,6 +37,8 @@ import type { BotCreateInput, BotRecord, BotUpdatePatch } from './types.ts'
 import { botRecordSchema } from './schema.ts'
 
 export type { BotCreateInput, BotRecord, BotUpdatePatch, TriggerConfig } from './types.ts'
+export { buildBotAgentSetup, resolveEnabledSkills } from './agent-setup.ts'
+export type { EnabledSkillSummary } from './agent-setup.ts'
 
 /** Cordis plugin name. */
 export const name = 'chat-bots'
@@ -138,6 +143,9 @@ export class ChatBots extends Service {
   /** Persona-section disposers by bot id, for live persona edits. */
   private readonly personaDispose = new Map<string, () => void>()
 
+  /** LLM call trace recorder backing the debug「对话信息」window. */
+  private trace: LlmTraceRecorder | undefined
+
   /**
    * Resolves once the late-activating `settings`/`credentials` services are
    * mounted. Declaring them in the module-level `inject` array deadlocks the
@@ -174,6 +182,15 @@ export class ChatBots extends Service {
       await bots.put(id, { ...bot, workspaceDir, updatedAt: Date.now() })
     }
     this.registerHttp()
+    // 一次性凭证镜像：把官方 DeepSeek 模型记录的 key 同步到共享
+    // DEEPSEEK_API_KEY（web_search 等 dsh 内置功能读这个引用），存量记录
+    // 无需重新保存即生效。
+    void mirrorDeepSeekCredential(await this.servicesReady, this.models.list()).catch(() => {})
+    // LLM 调用追踪：拦截全部 llm/stream waterfall，供调试面板「对话信息」查看
+    this.trace = new LlmTraceRecorder(this.ctx, (sessionId) => {
+      const bot = sessionId === undefined ? undefined : this.botBySessionId(sessionId)
+      return bot === undefined ? undefined : { botId: bot.id, botName: bot.name }
+    })
     // Private-chat event bridge: translate bot session events into the legacy
     // UI shapes and fan them out over the SSE channel.
     this.ctx.on('session/event', (session, event) => {
@@ -288,26 +305,33 @@ export class ChatBots extends Service {
     return record
   }
 
-  /** Patch a bot; persona edits apply live, model edits rebuild the agent. */
+  /** Patch a bot; persona edits apply live, model/capability edits rebuild the agent. */
   async update(id: string, patch: BotUpdatePatch): Promise<BotRecord> {
     const current = this.get(id)
     if (current === undefined) throw new Error(`chat-bots: bot "${id}" not found`)
+    // Capability lists arriving as explicit `undefined` (a partial patch) must
+    // not erase the stored values through the record spread below.
+    const sanitized: BotUpdatePatch = Object.fromEntries(
+      Object.entries(patch).filter(([, v]) => v !== undefined)) as BotUpdatePatch
     const next: BotRecord = {
       ...current,
-      ...patch,
-      trigger: patch.trigger ?? current.trigger,
+      ...sanitized,
+      trigger: sanitized.trigger ?? current.trigger,
       updatedAt: Date.now(),
     }
     await this.store.table('bots').put(id, next)
 
-    const modelChanged = patch.provider !== undefined || patch.model !== undefined
-    const personaChanged = patch.persona !== undefined && patch.persona !== current.persona
+    const modelChanged = sanitized.provider !== undefined || sanitized.model !== undefined
+    const personaChanged = sanitized.persona !== undefined && sanitized.persona !== current.persona
     // Agent 开关在 setup（agent 级 tools.guard）中生效，切换必须重建 agent
     const effectiveAgentEnabled = current.agentEnabled ?? current.workspaceDir !== undefined
-    const agentToggleChanged = patch.agentEnabled !== undefined && Boolean(patch.agentEnabled) !== effectiveAgentEnabled
+    const agentToggleChanged = sanitized.agentEnabled !== undefined && Boolean(sanitized.agentEnabled) !== effectiveAgentEnabled
+    // 工具/技能/MCP 白名单全部在 agent setup 中生效，变化必须重建 agent
+    const capabilitiesChanged = (['enabledTools', 'enabledSkills', 'enabledMcpServers'] as const)
+      .some(key => sanitized[key] !== undefined && JSON.stringify(sanitized[key]) !== JSON.stringify(current[key]))
 
     if (this.handles.has(id)) {
-      if (modelChanged || agentToggleChanged) {
+      if (modelChanged || agentToggleChanged || capabilitiesChanged) {
         // Model/provider live in AgentOptions, fixed at creation: rebuild on
         // the same durable session identity (resume keeps the bot's memory).
         await this.rebuildAgent(id)
@@ -377,30 +401,12 @@ export class ChatBots extends Service {
     const bot = this.get(id)
     if (bot === undefined) throw new Error(`chat-bots: bot "${id}" not found`)
     const agentOptions = { provider: bot.provider, model: bot.model }
-    const setup = (agentCtx: Context): void => {
-      agentCtx.systemPrompt.section({
-        name: 'chat:persona',
-        order: 0,
-        text: bot.persona,
-      })
-      // 工作区围栏：session cwd = bot 工作目录，dsh 内置沙箱（workspace-write
-      // 模式）自动把全部写操作限制在该目录内，越界抛 FS_SANDBOX_DENIED。
-
-      // Agent 能力关闭（三重防线）：
-      // 1) 请求不携带任何工具 schema（模型根本不知道工具存在）
-      // 2) 提示词明确告知仅纯文本对话
-      // 3) 即便模型幻觉出工具调用，guard 拒绝执行
-      const agentEnabled = bot.agentEnabled ?? bot.workspaceDir !== undefined
-      if (!agentEnabled) {
-        agentCtx.systemPrompt.suppressTools()
-        agentCtx.systemPrompt.section({
-          name: 'chat:no-tools',
-          order: 1,
-          text: '【重要】你没有任何可调用的工具或技能（包括读写文件、执行命令、搜索等）。请直接以纯文本对话回答，不要尝试调用任何工具。',
-        })
-        agentCtx.tools.guard(() => '该好友未开启 Agent 能力，无法调用工具或技能')
-      }
-    }
+    // Enabled-skill summaries are resolved up front: the setup callback must
+    // stay synchronous, so the async registry lookup happens before creation.
+    const skillSummaries = await resolveEnabledSkills(this.ctx, bot)
+    // Shared capability wiring: persona section, agent-disable triple guard,
+    // tool whitelist, and the enabled-skill catalog + `skill` loader tool.
+    const setup = buildBotAgentSetup(this.ctx, bot, skillSummaries)
     // A persisted session (restart) resumes with its durable memory intact;
     // a fresh bot has none yet, so the resume falls back to creation.
     let handle: AgentHandle
@@ -449,6 +455,29 @@ export class ChatBots extends Service {
   private registerHttp(): void {
     this.registerSseEndpoint()
 
+    // ── llm-trace endpoints（调试面板「对话信息」窗口）──
+    this.ctx.webServer.register({
+      kind: 'prefix',
+      path: '/chatapi/llm-trace',
+      handler: async (req, res) => {
+        const json = (status: number, body: unknown): void => {
+          res.writeHead(status, { 'content-type': 'application/json' })
+          res.end(JSON.stringify(body))
+        }
+        try {
+          if (req.method === 'GET') return json(200, this.trace?.list() ?? [])
+          if (req.method === 'DELETE') {
+            this.trace?.clear()
+            return json(200, { ok: true })
+          }
+          return json(405, { error: 'method not allowed' })
+        } catch (error: unknown) {
+          this.ctx.logger.warn('chat-bots llm-trace endpoint failed: %o', error)
+          return json(500, { error: String(error) })
+        }
+      },
+    })
+
     // ── misc endpoints（工作区目录打开 / 默认工作区根 / 会话预览）──
     this.ctx.webServer.register({
       kind: 'prefix',
@@ -486,6 +515,23 @@ export class ChatBots extends Service {
             const base = join(process.env.HOME ?? '', 'chat-agent-workspace')
             await mkdir(base, { recursive: true })
             return json(200, { dir: base })
+          }
+
+          // 数据目录清单：dsh home 下真实存在的存储位置（设置页「数据目录」）
+          if (action === 'data-dirs') {
+            const root = resolveDshHome()
+            const entries = [
+              { name: 'storages/', rel: 'storages' },
+              { name: 'workspace/agents/', rel: 'workspace/agents' },
+              { name: 'workspace/groups/', rel: 'workspace/groups' },
+              { name: 'sessions/', rel: 'sessions' },
+              { name: 'skills/', rel: 'skills' },
+            ]
+            await Promise.all(entries.map(entry => mkdir(join(root, entry.rel), { recursive: true })))
+            return json(200, {
+              root,
+              dirs: entries.map(entry => ({ name: entry.name, path: join(root, entry.rel) })),
+            })
           }
 
           // 会话列表预览：返回 bot 私聊/群聊的最后一行
@@ -526,6 +572,11 @@ export class ChatBots extends Service {
     const parseBotInput = (body: unknown): BotCreateInput => {
       const raw = body as Record<string, unknown>
       if (typeof raw.name !== 'string' || raw.name === '') throw new Error('name is required')
+      const strArray = (key: string): string[] | undefined => {
+        const value = raw[key]
+        if (!Array.isArray(value)) return undefined
+        return value.filter((item): item is string => typeof item === 'string')
+      }
       return {
         name: raw.name,
         avatar: typeof raw.avatar === 'string' ? raw.avatar : undefined,
@@ -536,6 +587,9 @@ export class ChatBots extends Service {
         provider: typeof raw.provider === 'string' ? raw.provider : 'deepseek',
         model: typeof raw.model === 'string' ? raw.model : '',
         trigger: raw.trigger === undefined ? undefined : raw.trigger as BotCreateInput['trigger'],
+        enabledTools: strArray('enabledTools'),
+        enabledSkills: strArray('enabledSkills'),
+        enabledMcpServers: strArray('enabledMcpServers'),
       }
     }
 
@@ -571,6 +625,7 @@ export class ChatBots extends Service {
               return json(res, 400, { error: '自定义供应商必须填写接口地址' })
             }
             await syncRoute(await this.servicesReady, record, record.apiKey)
+            await mirrorDeepSeekCredential(await this.servicesReady, [record])
             await models.put(record)
             return json(res, 200, toFrontModel(record))
           }
@@ -588,6 +643,7 @@ export class ChatBots extends Service {
             }
             await removeRoute(await this.servicesReady, record.id, record.provider)
             await syncRoute(await this.servicesReady, record, record.apiKey)
+            await mirrorDeepSeekCredential(await this.servicesReady, [...models.list(), record])
             await models.put(record)
             return json(res, 200, toFrontModel(record))
           }
@@ -597,6 +653,10 @@ export class ChatBots extends Service {
             const current = models.get(modelId)
             if (current === undefined) return json(res, 404, { error: `model "${modelId}" not found` })
             await removeRoute(await this.servicesReady, current.id, current.provider)
+            await mirrorDeepSeekCredential(
+              await this.servicesReady,
+              models.list().filter(m => m.id !== current.id),
+            )
             await models.delete(current.id)
             return json(res, 200, { deleted: true })
           }
@@ -614,10 +674,15 @@ export class ChatBots extends Service {
       path: '/chatapi/skills',
       handler: async (req, res) => {
         try {
-          const match = /^\/chatapi\/skills(?:\/([^/]+))?(\/[a-z-]+)?$/.exec(req.url ?? '')
+          const url = req.url ?? ''
+          // Action URLs carry a single segment; they must be matched first,
+          // otherwise the greedy `([^/]+)` would capture e.g. "install-local"
+          // as a skill name and the action branches below would never fire.
+          const actionMatch = /^\/chatapi\/skills(\/find|\/install-local|\/install-github)$/.exec(url)
+          const match = actionMatch ?? /^\/chatapi\/skills(?:\/([^/]+))?$/.exec(url)
           if (match === null) return json(res, 404, { error: 'not found' })
-          const skillName = match[1]
-          const action = match[2]
+          const skillName = actionMatch === null ? match[1] : undefined
+          const action = actionMatch?.[1]
           const userSkillsRoot = join(resolveDshHome(), 'skills')
 
           // GET /chatapi/skills — dsh skill 注册表投影（含 bundled + user + project）
@@ -732,6 +797,35 @@ export class ChatBots extends Service {
             return json(res, 200, { installed, skipped })
           }
 
+          // POST /chatapi/skills/find — 搜索 skills.sh 远程注册表
+          if (skillName === undefined && action === '/find' && req.method === 'POST') {
+            const body = await readBody(req)
+            const query = typeof body.query === 'string' ? body.query.trim() : ''
+            const owner = typeof body.owner === 'string' && body.owner.trim() !== '' ? body.owner.trim() : undefined
+            if (query === '') return json(res, 400, { error: 'query 必填' })
+            const hits = await searchSkillsApi(query, owner)
+            return json(res, 200, {
+              skills: hits.map(hit => ({
+                name: hit.name,
+                slug: hit.slug,
+                source: hit.source,
+                installs: hit.installs,
+                installsLabel: formatInstalls(hit.installs),
+                installCommand: `npx skills add ${hit.source || hit.slug}@${hit.name}`,
+                url: `https://skills.sh/${hit.slug}`,
+              })),
+            })
+          }
+
+          // POST /chatapi/skills/install-github — 从 GitHub 仓库导入技能
+          if (skillName === undefined && action === '/install-github' && req.method === 'POST') {
+            const body = await readBody(req)
+            const source = typeof body.source === 'string' ? body.source.trim() : ''
+            if (source === '') return json(res, 400, { error: 'source 必填' })
+            const result = await installGithubSkill(source, userSkillsRoot)
+            return json(res, 200, result)
+          }
+
           return json(res, 405, { error: 'method not allowed' })
         } catch (error: unknown) {
           this.ctx.logger.warn('chat-bots skills endpoint failed: %o', error)
@@ -808,6 +902,18 @@ export class ChatBots extends Service {
               source: { kind: 'user' },
             }))
             return json(res, 200, { accepted: true })
+          }
+
+          // POST /chatapi/bots/:id/stop — 终止正在生成的回复（取消当前
+          // turn：中止模型请求与工具循环；保留会话与历史）
+          if (action === '/stop') {
+            if (req.method !== 'POST') return json(res, 405, { error: 'method not allowed' })
+            const handle = this.handles.get(botId)
+            const agent = handle?.agent
+            if (agent === undefined) return json(res, 200, { ok: true, stopped: false })
+            const stopped = agent.status === 'running'
+            if (stopped) agent.cancel({ kind: 'user' })
+            return json(res, 200, { ok: true, stopped })
           }
 
           if (action === '/history') {

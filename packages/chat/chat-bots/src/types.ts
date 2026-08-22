@@ -42,6 +42,12 @@ export interface BotRecord {
   readonly agentEnabled?: boolean | undefined
   /** Per-bot agent workspace directory, when agent mode is on. */
   readonly workspaceDir?: string | undefined
+  /** Tool-name whitelist for this bot's agent; empty/missing = every tool. */
+  readonly enabledTools?: readonly string[] | undefined
+  /** Skill-name whitelist for this bot's agent; empty/missing = no skills. */
+  readonly enabledSkills?: readonly string[] | undefined
+  /** MCP server-id whitelist persisted for this bot (runtime wiring pending). */
+  readonly enabledMcpServers?: readonly string[] | undefined
   readonly createdAt: number
   readonly updatedAt: number
 }

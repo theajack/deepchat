@@ -138,6 +138,9 @@ importers:
       '@deepseek-ai/dsh-chat-group':
         specifier: workspace:^
         version: link:../../../packages/chat/chat-group
+      '@deepseek-ai/dsh-chat-web-search':
+        specifier: workspace:^
+        version: link:../../../packages/chat/chat-web-search
 
   apps/cli:
     dependencies:
@@ -1676,6 +1679,21 @@ importers:
       '@deepseek-ai/dsh-storage-domain':
         specifier: workspace:^
         version: link:../../storage/storage-domain
+
+  packages/chat/chat-web-search:
+    devDependencies:
+      '@deepseek-ai/cordis':
+        specifier: workspace:^
+        version: link:../../../vendor/cordis
+      '@deepseek-ai/dsh-credentials':
+        specifier: workspace:^
+        version: link:../../credentials/credentials
+      '@deepseek-ai/dsh-web':
+        specifier: workspace:^
+        version: link:../../web/web
+      '@deepseek-ai/dsh-web-search-deepseek':
+        specifier: workspace:^
+        version: link:../../web/web-search-deepseek
 
   packages/client/connection:
     dependencies:
@@ -13719,6 +13737,7 @@ packages:
 
   lucide-vue-next@1.0.0:
     resolution: {integrity: sha512-V6SPvx1IHTj/UY+FrIYWV5faISsPSb8BnWSFDxAtezWKvWc9ZZ40PDrdu1/Qb5vg4lHWr1hs1BAMGVGm6V1Xdg==}
+    deprecated: Package deprecated. Please use @lucide/vue instead.
     peerDependencies:
       vue: '>=3.0.1'
 

@@ -57,12 +57,14 @@ export async function dshGet<T>(path: string): Promise<T> {
   return await res.json() as T
 }
 
-/** JSON 写请求 */
+/** JSON 写请求（GET/HEAD 不允许携带 body，自动省略） */
 export async function dshSend<T>(method: string, path: string, body?: unknown): Promise<T> {
+  const hasBody = method.toUpperCase() !== 'GET' && method.toUpperCase() !== 'HEAD' && body !== undefined
   const res = await dshFetch(path, {
     method,
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify(body ?? {}),
+    ...(hasBody
+      ? { headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }
+      : {}),
   })
   const json = await res.json() as T & { error?: unknown }
   if (!res.ok) throw new Error(`${path}: HTTP ${String(res.status)} ${String(json.error ?? '')}`)

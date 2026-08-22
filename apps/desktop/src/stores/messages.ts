@@ -4,7 +4,7 @@ import { chatApi } from '../services/chatApi'
 import { transport } from '../services/ipc'
 import type { Conversation, Message, StreamFrame, TypingFrame } from '../types'
 import { useConversationsStore } from './conversations'
-import { openUrlBuiltin } from '../utils/browser'
+import { openUrl } from '../utils/browser'
 
 export interface StreamSegment {
   type: 'reasoning' | 'text' | 'tool'
@@ -56,6 +56,8 @@ export const useMessagesStore = defineStore('messages', () => {
   const reasoningStartAt = new Map<string, number>()
   /** tool 执行计时：key = toolCallId，value = 开始时间戳 */
   const toolStartAt = new Map<string, number>()
+  /** openUrl 工具参数：key = toolCallId，value = 待打开的 url 参数 */
+  const openUrlArgs = new Map<string, string>()
 
   let eventsBound = false
 
@@ -243,6 +245,11 @@ export const useMessagesStore = defineStore('messages', () => {
           upsertToolSegment(d.draftId, d.id)
           // 记录工具开始执行时间
           toolStartAt.set(d.id, Date.now())
+          // openUrl 工具：记录参数，tool.end 成功后按 default_browser 设置打开
+          if (d.name === 'openUrl') {
+            const url = (d.args as { url?: unknown } | undefined)?.url
+            if (typeof url === 'string' && url.trim() !== '') openUrlArgs.set(d.id, url)
+          }
           break
         }
         case 'agent.tool.update': {
@@ -271,12 +278,13 @@ export const useMessagesStore = defineStore('messages', () => {
             }
             toolCalls.value = { ...toolCalls.value, [d.draftId]: [...arr] }
           }
-          // openUrl 工具内置浏览器模式：打开独立浏览器窗口（异步，不阻塞事件处理）
-          if (d.name === 'openUrl' && d.result) {
-            const details = (d.result as { details?: { action?: string; url?: string } }).details
-            if (details?.action === 'open_builtin_browser' && details.url) {
-              void openUrlBuiltin(details.url)
-            }
+          // openUrl 工具：执行成功后按 default_browser 设置打开
+          // （builtin → 应用内浏览器窗口；system → 经后端系统命令打开）
+          if ((d.name ?? t?.name) === 'openUrl') {
+            const url = openUrlArgs.get(d.id)
+            openUrlArgs.delete(d.id)
+            const failed = (d.result as { isError?: boolean } | undefined)?.isError === true
+            if (url !== undefined && !failed) void openUrl(url)
           }
           break
         }

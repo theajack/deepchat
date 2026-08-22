@@ -46,8 +46,12 @@ removeRoute(ctx, id, provider)   // 删除路由 + credentials.unset（整段重
 - `POST /chatapi/skills` — 从模板创建（写入 `$DSH_HOME/skills/{name}/SKILL.md`）
 - `DELETE /chatapi/skills/:name` — 仅允许删 user-dsh 根下的技能
 - `POST /chatapi/skills/install-local` — 本地目录批量安装
+- `POST /chatapi/skills/find` — 搜索 skills.sh 远程注册表（`src/skills-remote.ts` 的 `searchSkillsApi`，网络失败静默返回空列表）
+- `POST /chatapi/skills/install-github` — `git clone --depth 1` 到临时目录 → 递归发现 SKILL.md（解析 frontmatter name）→ 复制到 `$DSH_HOME/skills/<name>` → 回写 frontmatter `source: owner/repo`
 
-**前端映射**（ipc.ts）：`skill.list/create/delete/installLocal`；`skill.find`（GitHub 搜索）与 `skill.installGithub` 留待 M4。
+**路由坑**：单段 action URL（`/find`、`/install-local`、`/install-github`）必须先于资源 URL 匹配 —— 原正则的贪婪 `([^/]+)` 会把 `install-local` 当成 skillName 导致 action 分支永远不触发。现用显式 action 白名单正则先行匹配。
+
+**前端映射**（ipc.ts）：`skill.list/create/delete/installLocal/find/installGithub` 全部已迁移。
 
 **注意**：bundle 里 `tool-skill` disabled —— 技能目录不注入模型（chat bot 不该吃开发技能目录），但 `dsh-skill` registry 保留给设置页。
 

@@ -78,6 +78,36 @@ export function apiKeyRefFor(id: string): string {
   return `CHAT_AGENT_MODEL_${id.replace(/-/g, '_').toUpperCase()}`
 }
 
+/** True when a record targets DeepSeek's official endpoints (empty baseUrl = family default). */
+function usesOfficialDeepSeek(record: ModelRecord): boolean {
+  if (record.provider !== 'deepseek') return false
+  const baseUrl = record.baseUrl !== '' ? record.baseUrl : DEFAULT_BASE_URL.deepseek
+  return baseUrl === DEFAULT_BASE_URL.deepseek
+}
+
+/**
+ * Mirror one official-DeepSeek record's key to the shared `DEEPSEEK_API_KEY`
+ * credential. dsh's web-search-deepseek provider (the `web_search` tool's
+ * backend) authenticates with that reference — without the mirror the model
+ * page's per-record credentials are invisible to it.
+ */
+export const DEEPSEEK_SHARED_CREDENTIAL_REF = 'DEEPSEEK_API_KEY'
+
+/** Mirror official-DeepSeek keys so dsh built-ins (web search) can use them. */
+export async function mirrorDeepSeekCredential(ctx: Context, records: readonly ModelRecord[]): Promise<void> {
+  const official = records.filter(record => usesOfficialDeepSeek(record) && record.apiKey !== '')
+  if (official.length === 0) {
+    await ctx.credentials.unset(credentialRef(DEEPSEEK_SHARED_CREDENTIAL_REF))
+    return
+  }
+  // Multiple official records: the newest-synced one wins (same as the UI's
+  // "default model" semantics — acceptable, keys normally identical).
+  const newest = official[official.length - 1]
+  if (newest !== undefined) {
+    await ctx.credentials.set(credentialRef(DEEPSEEK_SHARED_CREDENTIAL_REF), newest.apiKey)
+  }
+}
+
 /** The llm-pi-ai hand-declared provider profile for one record. */
 export function providerProfile(record: ModelRecord): Record<string, unknown> {
   const baseUrl = record.baseUrl !== '' ? record.baseUrl : DEFAULT_BASE_URL[record.provider] ?? ''
