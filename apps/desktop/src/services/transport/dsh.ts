@@ -121,3 +121,46 @@ export function dshEvents(onFrame: (frame: DshMuxFrame) => void): () => void {
     ws?.close()
   }
 }
+
+/** chat 业务事件帧（SSE `/chatapi/events` 下行） */
+export interface ChatEventFrame {
+  event: string
+  data: unknown
+}
+
+/**
+ * 订阅 chat 业务事件流（legacy 事件形状：message.stream / message.created /
+ * bot.typing / agent.tool.* / conversation.updated）。SSE 端点带 CORS 头，
+ * Tauri webview 与浏览器均可直连；断线自动重连。
+ */
+export function dshChatEvents(onFrame: (frame: ChatEventFrame) => void): () => void {
+  let source: EventSource | undefined
+  let disposed = false
+  let retryTimer: ReturnType<typeof setTimeout> | undefined
+
+  const connect = (): void => {
+    if (disposed) return
+    source = new EventSource(dshBaseUrl() + '/chatapi/events')
+    source.onmessage = (message) => {
+      try {
+        onFrame(JSON.parse(message.data) as ChatEventFrame)
+      } catch {
+        // 非 JSON 帧忽略
+      }
+    }
+    source.onerror = () => {
+      // EventSource 自动重连；仅在连接已关闭时手动兜底重连
+      if (source?.readyState === EventSource.CLOSED) {
+        source.close()
+        if (!disposed) retryTimer = setTimeout(connect, 3000)
+      }
+    }
+  }
+
+  connect()
+  return () => {
+    disposed = true
+    if (retryTimer !== undefined) clearTimeout(retryTimer)
+    source?.close()
+  }
+}

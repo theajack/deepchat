@@ -150,7 +150,7 @@ watch(
       @click="onToggle"
     >
       <Wrench :size="14" class="shrink-0 text-accent" :stroke-width="2" />
-      <span class="text-[12.5px] font-medium text-hi">{{ name }}</span>
+      <span class="text-[12.5px] font-medium text-hi">{{ name || t("tool.unknown") }}</span>
       <span class="font-num text-[10px] text-lo">
         {{ status === "running" ? t("tool.running") : status === "error" ? t("tool.failed") : t("tool.done") }}
       </span>

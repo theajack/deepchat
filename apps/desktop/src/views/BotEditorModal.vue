@@ -170,7 +170,7 @@ async function save() {
     persona: form.persona.trim(),
     skills: form.skills.split(/[,，]/).map((s) => s.trim()).filter(Boolean),
     model_id: model.id,
-    model_provider: "openai" as const,
+    model_provider: model.route_id || model.provider,
     model_name: model.model_name,
     trigger_config: {
       active_rate: Number(form.active_rate),

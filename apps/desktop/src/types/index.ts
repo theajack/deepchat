@@ -126,10 +126,11 @@ export interface ModelConfig {
   base_url: string
   api_key: string
   model_name: string
-  tool_use: number
-  image_input: number
-  reasoning_mode: number
-  custom_protocol: number
+  route_id: string
+  tool_use: boolean
+  image_input: boolean
+  reasoning_mode: boolean
+  custom_protocol: boolean
   input_ctx: string
   output_ctx: string
   created_at: number

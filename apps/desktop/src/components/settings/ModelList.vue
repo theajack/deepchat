@@ -1,16 +1,19 @@
 <script setup lang="ts">
 import { Pencil, Trash2, Plus, Star } from "lucide-vue-next";
-import { computed, onMounted, watch } from "vue";
+import { computed, onMounted, ref, watch } from "vue";
 import { useModelsStore } from "../../stores/models";
 import { useAppStore } from "../../stores/app";
 import { useSettingsStore } from "../../stores/settings";
 import { chatApi } from "../../services/chatApi";
+import ConfirmDialog from "../../utils/ConfirmDialog.vue";
 import type { ModelConfig } from "../../types";
 import { t } from "../../i18n";
 
 const models = useModelsStore();
 const app = useAppStore();
 const settings = useSettingsStore();
+
+const confirmDialog = ref<InstanceType<typeof ConfirmDialog> | null>(null);
 
 const defaultId = computed(() => settings.values["default_model_id"] ?? "");
 
@@ -64,7 +67,14 @@ async function setDefault(m: ModelConfig) {
 }
 
 async function remove(m: ModelConfig) {
-  if (!confirm(t("model.confirmDelete", { name: m.name }))) return;
+  // Tauri webview 禁用原生 window.confirm，必须走应用内确认弹窗
+  const ok = await confirmDialog.value?.ask({
+    title: t("model.confirmDeleteTitle", { name: m.name }),
+    message: t("model.confirmDelete", { name: m.name }),
+    confirmText: t("common.delete"),
+    danger: true,
+  });
+  if (!ok) return;
   try {
     const wasDefault = defaultId.value === m.id;
     await models.remove(m.id);
@@ -136,5 +146,7 @@ async function remove(m: ModelConfig) {
         </div>
       </div>
     </div>
+    <!-- 删除二次确认（Tauri webview 禁用原生 confirm） -->
+    <ConfirmDialog ref="confirmDialog" />
   </div>
 </template>

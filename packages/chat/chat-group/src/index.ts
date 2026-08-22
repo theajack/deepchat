@@ -15,6 +15,8 @@
  */
 
 import { randomUUID } from 'node:crypto'
+import { access, mkdir, readdir, rm } from 'node:fs/promises'
+import { join } from 'node:path'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { Context } from '@deepseek-ai/cordis'
 import { Service } from '@deepseek-ai/cordis'
@@ -27,10 +29,12 @@ import type { Session, SessionId } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 import { defineDomain, domainTable } from '@deepseek-ai/dsh-storage-domain'
 import type { Domain } from '@deepseek-ai/dsh-storage-domain'
-import { groupRecordSchema } from './schema.ts'
+import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
+import { botSessionRecordSchema, groupRecordSchema } from './schema.ts'
 import { shouldRespond } from './trigger.ts'
 import type { TriggerMessage } from './trigger.ts'
 import type { GroupCreateInput, GroupMessageView, GroupRecord, GroupUpdatePatch } from './types.ts'
+import { translateSessionEvent } from '@deepseek-ai/dsh-chat-bots/bridge'
 
 export type {
   GroupCreateInput,
@@ -67,7 +71,12 @@ export const Config: z<Config> = z.object({
 const groupsDomainSpec = defineDomain({
   name: 'chat_groups',
   version: 1,
-  tables: { groups: domainTable<string, GroupRecord>(groupRecordSchema) },
+  tables: {
+    groups: domainTable<string, GroupRecord>(groupRecordSchema),
+    // Per-(group, bot) chat sessions: a bot's group-chat memory, kept separate
+    // from its private-chat session so histories never cross-contaminate.
+    bot_sessions: domainTable<string, { sessionId: SessionId; createdAt: number; updatedAt: number }>(botSessionRecordSchema),
+  },
 })
 
 declare module '@deepseek-ai/cordis' {
@@ -83,6 +92,9 @@ export class ChatGroup extends Service {
   /** Live container-agent handles by group id. */
   private readonly containers = new Map<string, AgentHandle>()
 
+  /** Live per-(group, bot) agent handles with the bot-record revision they were built from. */
+  private readonly botAgents = new Map<string, { handle: AgentHandle; botUpdatedAt: number }>()
+
   /** Last group-reply time per bot id (epoch ms); in-memory cooldown state. */
   private readonly lastSpoke = new Map<string, number>()
 
@@ -95,6 +107,53 @@ export class ChatGroup extends Service {
     return this.domain
   }
 
+  /** Reset a group: fresh container session, fresh per-bot group memories, logs removed. */
+  async clear(id: string): Promise<void> {
+    const group = this.get(id)
+    if (group === undefined) throw new Error(`chat-group: group "${id}" not found`)
+    // 释放容器与所有 bot 群会话 agent
+    const container = this.containers.get(id)
+    if (container !== undefined) {
+      this.containers.delete(id)
+      await container.dispose()
+    }
+    const table = this.store.table('bot_sessions')
+    for (const key of [...table.entries()].map(([key]) => key)) {
+      if (!key.startsWith(`${id}:`)) continue
+      const binding = table.get(key)
+      const cached = this.botAgents.get(key)
+      if (cached !== undefined) {
+        this.botAgents.delete(key)
+        await cached.handle.dispose()
+      }
+      if (binding !== undefined) {
+        await table.delete(key)
+        await this.removeSessionLogs(binding.sessionId)
+      }
+    }
+    const sessionId = `session-${randomUUID()}` as SessionId
+    await this.store.table('groups').put(id, { ...group, sessionId, updatedAt: Date.now() })
+    await this.removeSessionLogs(group.sessionId)
+  }
+
+  /** Remove one session's log directories under $DSH_HOME/sessions. */
+  private async removeSessionLogs(sessionId: SessionId): Promise<void> {
+    const sessionsRoot = join(resolveDshHome(), 'sessions')
+    try {
+      for (const dir of await readdir(sessionsRoot)) {
+        const target = join(sessionsRoot, dir, sessionId)
+        try {
+          await access(target)
+          await rm(target, { recursive: true, force: true })
+        } catch {
+          // 该 cwd 分组下无此会话
+        }
+      }
+    } catch {
+      // sessions 根不存在则无事可做
+    }
+  }
+
   async [Service.init](): Promise<void> {
     this.domain = await this.ctx.storageDomain.open(groupsDomainSpec)
     this.ctx.effect(() => () => {
@@ -102,6 +161,114 @@ export class ChatGroup extends Service {
       this.domain = undefined
     }, 'chat-group domain')
     this.registerHttp()
+    // 一次性回填：为缺少工作目录的旧群记录补建 workspace/groups/{id}
+    const groups = this.domain.table('groups')
+    for (const [id, group] of groups.entries()) {
+      if (group.workspaceDir !== undefined) continue
+      const workspaceDir = join(resolveDshHome(), 'workspace', 'groups', id)
+      await mkdir(workspaceDir, { recursive: true })
+      await groups.put(id, { ...group, workspaceDir, updatedAt: Date.now() })
+    }
+    this.registerEventBridge()
+  }
+
+  /** Broadcast one legacy-shaped event frame through the chat-bots SSE channel. */
+  private broadcast(event: string, data: unknown): void {
+    this.ctx.chatBots.broadcast(event, data)
+  }
+
+  /**
+   * Group event bridge:
+   * - container appends (`group/user-message`, `group/bot-message`) become
+   *   `message.created` / `conversation.updated`;
+   * - per-bot group sessions stream `message.stream` / `bot.typing` /
+   *   `agent.tool.*` (their final message lands via the container append).
+   */
+  private registerEventBridge(): void {
+    this.ctx.on('session/event', (session, event) => {
+      if (event.type !== 'group/user-message' && event.type !== 'group/bot-message') {
+        // A per-bot group session: translate turn lifecycle into stream frames.
+        const binding = this.botSessionBinding(session.id)
+        if (binding === undefined) return
+        const bot = this.ctx.chatBots.get(binding.botId)
+        if (bot === undefined) return
+        const group = this.get(binding.groupId)
+        translateSessionEvent(session, event, {
+          conversationId: binding.groupId,
+          botId: bot.id,
+          botName: bot.name,
+          emitFinal: false,
+          conversation: group === undefined ? undefined : {
+            id: group.id,
+            type: 'group',
+            name: group.name,
+            avatar: group.avatar ?? null,
+            introduction: '',
+            unread_count: 0,
+            created_at: group.createdAt,
+          },
+        }, (name: string, data: unknown) => this.broadcast(name, data))
+        return
+      }
+
+      // A container append: only groups we own.
+      const group = this.list().find(record => record.sessionId === session.id)
+      if (group === undefined) return
+      if (event.type === 'group/user-message') {
+        this.broadcast('conversation.updated', {
+          id: group.id,
+          type: 'group',
+          name: group.name,
+          avatar: group.avatar ?? null,
+          introduction: '',
+          last_message_preview: event.data.text.slice(0, 60),
+          last_message_at: event.time,
+          unread_count: 0,
+          created_at: group.createdAt,
+        })
+        return
+      }
+      // group/bot-message → the durable group reply
+      this.broadcast('message.created', {
+        id: `g-${String(event.seq)}`,
+        conversation_id: group.id,
+        sender_type: 'ai_bot',
+        sender_id: event.data.botId,
+        sender_name: event.data.botName,
+        content: event.data.text,
+        content_type: 'text',
+        is_self: 0,
+        created_at: event.time,
+        segments: [{ type: 'text', content: event.data.text }],
+        prompt_tokens: 0,
+        completion_tokens: 0,
+        cached_tokens: 0,
+        duration_ms: 0,
+        stop_reason: '',
+      })
+      this.broadcast('conversation.updated', {
+        id: group.id,
+        type: 'group',
+        name: group.name,
+        avatar: group.avatar ?? null,
+        introduction: '',
+        last_message_preview: event.data.text.slice(0, 60),
+        last_message_at: event.time,
+        unread_count: 0,
+        created_at: group.createdAt,
+      })
+    })
+  }
+
+  /** Resolve a session id back to its (group, bot) binding, if we own it. */
+  private botSessionBinding(sessionId: SessionId): { groupId: string; botId: string } | undefined {
+    for (const [key, record] of this.store.table('bot_sessions').entries()) {
+      if (record.sessionId !== sessionId) continue
+      const separator = key.indexOf(':')
+      if (separator <= 0) continue
+      return { groupId: key.slice(0, separator), botId: key.slice(separator + 1) }
+    }
+    return undefined
   }
 
   // ── group CRUD ────────────────────────────────────────────────────────────
@@ -121,15 +288,20 @@ export class ChatGroup extends Service {
   /** Create a group with its container session identity. */
   async create(input: GroupCreateInput): Promise<GroupRecord> {
     const now = Date.now()
+    const id = `group-${randomUUID()}`
+    // 每个群固定工作目录：$DSH_HOME/workspace/groups/{uid}
+    const workspaceDir = join(resolveDshHome(), 'workspace', 'groups', id)
     const record: GroupRecord = {
       name: input.name,
       avatar: input.avatar,
       memberBotIds: input.memberBotIds ?? [],
-      id: `group-${randomUUID()}`,
+      id,
       sessionId: `session-${randomUUID()}` as SessionId,
+      workspaceDir,
       createdAt: now,
       updatedAt: now,
     }
+    await mkdir(workspaceDir, { recursive: true })
     await this.store.table('groups').put(record.id, record)
     return record
   }
@@ -167,7 +339,7 @@ export class ChatGroup extends Service {
     if (existing !== undefined) return existing.agent
     const live = this.ctx.agents.get(group.sessionId)
     if (live !== undefined) return live
-    const handle = await this.tryResume(group.sessionId)
+    const handle = await this.tryResume(group.sessionId, group.workspaceDir)
     this.containers.set(groupId, handle)
     this.ctx.effect(() => () => {
       if (this.containers.get(groupId) === handle) this.containers.delete(groupId)
@@ -175,13 +347,64 @@ export class ChatGroup extends Service {
     return handle.agent
   }
 
-  private async tryResume(sessionId: SessionId): Promise<AgentHandle> {
+  private async tryResume(sessionId: SessionId, cwd?: string): Promise<AgentHandle> {
     try {
       return await this.ctx.agents.resume({ resumeSessionId: sessionId, agentOptions: {} })
     } catch (error: unknown) {
       this.ctx.logger.warn('chat-group: container resume failed, creating fresh: %o', error)
-      return await this.ctx.agents.create({ sessionId, agentOptions: {} })
+      return await this.ctx.agents.create(cwd === undefined
+        ? { sessionId, agentOptions: {} }
+        : { sessionId, meta: { cwd }, agentOptions: {} })
     }
+  }
+
+  /**
+   * The bot's dedicated group-chat agent on its own persistent session —
+   * separate from the bot's private-chat memory. Rebuilt when the bot record
+   * (persona/model) changes; resumed across restarts otherwise.
+   */
+  private async ensureBotAgent(group: GroupRecord, bot: BotRecord): Promise<Agent> {
+    const key = `${group.id}:${bot.id}`
+    const cached = this.botAgents.get(key)
+    if (cached !== undefined && cached.botUpdatedAt === bot.updatedAt) {
+      return cached.handle.agent
+    }
+    if (cached !== undefined) {
+      this.botAgents.delete(key)
+      await cached.handle.dispose()
+    }
+
+    const table = this.store.table('bot_sessions')
+    let binding = table.get(key)
+    if (binding === undefined) {
+      const now = Date.now()
+      binding = { sessionId: `session-${randomUUID()}` as SessionId, createdAt: now, updatedAt: now }
+      await table.put(key, binding)
+    }
+
+    const agentOptions = { provider: bot.provider, model: bot.model }
+    const setup = (agentCtx: Context): void => {
+      agentCtx.systemPrompt.section({
+        name: 'chat:persona',
+        order: 0,
+        text: bot.persona,
+      })
+      // 工作区围栏：session cwd = bot 工作目录，dsh 内置沙箱（workspace-write）
+      // 自动限制全部写操作；群聊沿用 bot 自己的工作区（旧版语义）。
+    }
+    let handle: AgentHandle
+    try {
+      handle = await this.ctx.agents.resume({ resumeSessionId: binding.sessionId, agentOptions, setup })
+    } catch {
+      handle = await this.ctx.agents.create(bot.workspaceDir === undefined
+        ? { sessionId: binding.sessionId, agentOptions, setup }
+        : { sessionId: binding.sessionId, meta: { cwd: bot.workspaceDir }, agentOptions, setup })
+    }
+    this.botAgents.set(key, { handle, botUpdatedAt: bot.updatedAt })
+    this.ctx.effect(() => () => {
+      if (this.botAgents.get(key)?.handle === handle) this.botAgents.delete(key)
+    }, `chat-group bot agent ${key}`)
+    return handle.agent
   }
 
   // ── orchestration ─────────────────────────────────────────────────────────
@@ -202,10 +425,20 @@ export class ChatGroup extends Service {
   /** The anti-infinite-loop cascade: each round evaluates the latest message. */
   private async runCascade(group: GroupRecord, message: TriggerMessage): Promise<void> {
     const maxRounds = this.config.maxGroupRounds ?? DEFAULT_MAX_GROUP_ROUNDS
+    // 首条消息若 @ 了成员，只有被 @ 的成员回复该消息（旧版群聊语义）
+    const mentionedBotIds = new Set(
+      group.memberBotIds.filter((botId) => {
+        const bot = this.ctx.chatBots.get(botId)
+        return bot !== undefined && message.text.includes(`@${bot.name}`)
+      }),
+    )
+    const hasMention = mentionedBotIds.size > 0
+
     for (let round = 0; round < maxRounds; round++) {
       const responders: BotRecord[] = []
       for (const botId of group.memberBotIds) {
         if (botId === message.senderId) continue
+        if (round === 0 && hasMention && !mentionedBotIds.has(botId)) continue
         const bot = this.ctx.chatBots.get(botId)
         if (bot === undefined) continue
         const respond = shouldRespond(bot, message, {
@@ -230,7 +463,7 @@ export class ChatGroup extends Service {
   /** Drive one bot's group reply; returns its message for the next round. */
   private async speak(group: GroupRecord, bot: BotRecord): Promise<TriggerMessage | null> {
     const container = await this.containerAgent(group.id)
-    const agent = await this.ctx.chatBots.ensureAgent(bot.id)
+    const agent = await this.ensureBotAgent(group, bot)
     const context = renderGroupContext(container.session, this.config.contextWindow ?? DEFAULT_CONTEXT_WINDOW)
 
     // Hidden durable context: the rendered group transcript (relay form).
@@ -270,6 +503,39 @@ export class ChatGroup extends Service {
   // ── HTTP surface ──────────────────────────────────────────────────────────
 
   private registerHttp(): void {
+    // ── misc：群会话预览（会话列表最后一行）──
+    this.ctx.webServer.register({
+      kind: 'prefix',
+      path: '/chatapi/group-misc',
+      handler: async (req, res) => {
+        const json = (status: number, body: unknown): void => {
+          res.writeHead(status, { 'content-type': 'application/json' })
+          res.end(JSON.stringify(body))
+        }
+        try {
+          if (req.method !== 'POST') return json(405, { error: 'method not allowed' })
+          const body = await readBody(req)
+          if (String(body.action ?? '') !== 'conversation-previews') {
+            return json(404, { error: 'unknown action' })
+          }
+          const previews: Record<string, { preview: string; at: number }> = {}
+          for (const group of this.list()) {
+            try {
+              const container = await this.containerAgent(group.id)
+              const rows = renderHistory(container.session)
+              const last = rows.at(-1)
+              if (last !== undefined) previews[group.id] = { preview: last.text.slice(0, 60), at: last.time }
+            } catch {
+              // 容器恢复失败的群跳过预览
+            }
+          }
+          return json(200, { previews })
+        } catch (error: unknown) {
+          return json(500, { error: String(error) })
+        }
+      },
+    })
+
     const json = (res: ServerResponse, status: number, body: unknown): void => {
       res.writeHead(status, { 'content-type': 'application/json' })
       res.end(JSON.stringify(body))
@@ -308,6 +574,14 @@ export class ChatGroup extends Service {
               return json(res, 200, group)
             }
             return json(res, 405, { error: 'method not allowed' })
+          }
+
+          if (action === '/clear') {
+            if (req.method !== 'POST') return json(res, 405, { error: 'method not allowed' })
+            await this.clear(groupId)
+            // 通知前端清除该会话的全部本地状态（含流式残留）
+            this.ctx.chatBots.broadcast('message.cleared', { conversationId: groupId })
+            return json(res, 200, { cleared: true })
           }
 
           if (action === '/send') {

@@ -23,6 +23,9 @@ export const botRecordSchema = z.object({
   model: z.string(),
   trigger: triggerSchema,
   sessionId: z.string().transform(SessionId),
+  deletedAt: z.number().int().nonnegative().optional(),
+  introduction: z.string().optional(),
+  workspaceDir: z.string().optional(),
   createdAt: z.number().int().nonnegative(),
   updatedAt: z.number().int().nonnegative(),
 }) satisfies z.ZodType<BotRecord>

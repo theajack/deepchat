@@ -21,6 +21,12 @@
       "path": "../../util/home-paths"
     },
     {
+      "path": "../../settings/settings"
+    },
+    {
+      "path": "../../credentials/credentials"
+    },
+    {
       "path": "../../skill/skill"
     },
     {

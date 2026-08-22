@@ -123,6 +123,36 @@ export const useMessagesStore = defineStore('messages', () => {
     transport.onEvent((frame) => {
       console.log('[AGENT-DBG] messages.onEvent', frame.event)
       switch (frame.event) {
+        case 'message.cleared': {
+          // 服务端会话已清空（新 session）：清除该会话全部本地状态，
+          // 包括消息、流式草稿、工具调用与 typing（旧 run 的残留事件一律丢弃）
+          const c = frame.data as { conversationId: string }
+          byConv.value = { ...byConv.value, [c.conversationId]: [] }
+          cleanupDrafts(c.conversationId)
+          typing.value = Object.fromEntries(
+            Object.entries(typing.value).filter(([key]) => !key.startsWith(`${c.conversationId}:`)))
+          // 新 session 的 draftId（m-p1…）会与旧 run 碰撞，直接整体清空；
+          // 其他会话的记录在切换/load 时会按历史重建
+          toolCalls.value = {}
+          segmentsCache.value = {}
+          break
+        }
+        case 'message.error': {
+          // turn 以 error 结束（LLM 5xx / model_not_found / 凭据失效等）：
+          // 以一条错误消息呈现，避免静默无回复
+          const e = frame.data as { conversationId: string; botId: string; botName?: string; message: string }
+          append({
+            id: `err-${String(Date.now())}`,
+            conversation_id: e.conversationId,
+            sender_type: 'ai_bot',
+            sender_id: e.botId,
+            sender_name: e.botName ?? '',
+            content: `⚠️ ${e.message}`,
+            content_type: 'text',
+            is_self: 0,
+            created_at: Date.now(),
+          } as Message)
+          break        }
         case 'message.stream': {
           const f = frame.data as StreamFrame & { reasoning?: boolean; segments?: StreamSegment[] }
           if (f.done) {

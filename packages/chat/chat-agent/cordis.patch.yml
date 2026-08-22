@@ -14,6 +14,20 @@
   config:
     persona: ''
 
+# Chat companions must not inherit workspace/project instructions: bot
+# workspaces live inside this repo, so the walk-up would feed the harness
+# repo's AGENTS.md (16KB of contributor guidelines) into every first prompt.
+# maxBytes: 0 disables instruction loading entirely for this profile.
+- id: agent-instructions
+  config:
+    maxBytes: 0
+
+# The model-facing skill catalog (~10KB) and the `skill` loader tool are
+# dev-tooling noise for chat bots (legacy bots start with no skills); the
+# dsh-skill registry itself stays mounted for the settings page.
+- id: tool-skill
+  disabled: true
+
 # The shared module-reload HMR row stays off; the desktop app reloads itself.
 - id: hmr
   disabled: true

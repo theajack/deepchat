@@ -149,7 +149,7 @@ const rows = computed<Row[]>(() => {
   const hasStream = Object.values(messages.streams).some((s) => s.conversationId === convId);
   if (typingNames.length > 0 && !hasStream) {
     const isGroup = conv.value?.type === "group";
-    const typingBotId = typingEntries[0][0].split(":").slice(1).join(":");
+    const typingBotId = typingEntries[0][0].split(":").pop() ?? "";
     const typingAvatar = bots.items.find((b) => b.id === typingBotId)?.avatar ?? null;
     result.push({ type: "msg", key: "typing", model: { key: "typing", isSelf: false, senderName: typingNames[0], avatar: typingAvatar, content: "", time: null, showAvatar: true, showSender: isGroup, streaming: true } });
   }

@@ -61,7 +61,7 @@ export class WebviewManager {
         import('@tauri-apps/api/webview'),
         import('@tauri-apps/api/dpi'),
       ])
-      this.WebviewCls = Webview
+      this.WebviewCls = Webview as unknown as WebviewCtor
       this.LogicalPositionCls = LogicalPosition
       this.LogicalSizeCls = LogicalSize
       this.currentWindow = getCurrentWindow()

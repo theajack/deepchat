@@ -1,0 +1,420 @@
+import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
+
+/**
+ * Shared translation of agent session events into the legacy chat-agent
+ * event shapes the desktop UI consumes (`message.stream`, `message.created`,
+ * `bot.typing`, `agent.tool.*`, `conversation.updated`).
+ *
+ * Both the private-chat bridge (chat-bots) and the group bridge (chat-group)
+ * drive this translator; the transport is one SSE channel
+ * (`GET /chatapi/events`) registered by chat-bots.
+ */
+
+/** Rich chat row: what `/history` endpoints return and what `message.created` carries. */
+export interface ChatMessageRow {
+  readonly id: string
+  readonly kind: 'user' | 'assistant'
+  readonly time: number
+  readonly text: string
+  readonly senderId: string
+  readonly senderName: string
+  readonly segments: Array<{ type: 'reasoning' | 'text' | 'tool'; content: string; toolId?: string }>
+  readonly toolCalls: Array<{
+    id: string
+    name: string
+    args?: unknown
+    result?: { content?: Array<{ type: string; text?: string }>; isError?: boolean }
+    isError?: boolean
+  }>
+  readonly promptTokens: number
+  readonly completionTokens: number
+  readonly cachedTokens: number
+  readonly durationMs: number
+  readonly stopReason: string
+}
+
+/** Where a translated event goes: one conversation and one speaking bot. */
+export interface BridgeTarget {
+  readonly conversationId: string
+  readonly botId: string
+  readonly botName: string
+  /** Emit the final `message.created` on turn end (private chats). Group finals arrive via the container log instead. */
+  readonly emitFinal: boolean
+  /** Full Conversation record for the `conversation.updated` broadcast. */
+  readonly conversation?: Record<string, unknown> | undefined
+}
+
+export type Broadcast = (event: string, data: unknown) => void
+
+/** The front-end `Message` shape built from one aggregated turn. */
+export function toCreatedMessage(row: ChatMessageRow, target: BridgeTarget): Record<string, unknown> {
+  return {
+    id: row.id,
+    conversation_id: target.conversationId,
+    sender_type: 'ai_bot',
+    sender_id: target.botId,
+    sender_name: target.botName,
+    content: row.text,
+    content_type: 'text',
+    is_self: 0,
+    created_at: row.time,
+    draftId: row.id,
+    tool_calls: row.toolCalls,
+    segments: row.segments,
+    prompt_tokens: row.promptTokens,
+    completion_tokens: row.completionTokens,
+    cached_tokens: row.cachedTokens,
+    duration_ms: row.durationMs,
+    stop_reason: row.stopReason,
+  }
+}
+
+/**
+ * Per-session prompt sequence: a user prompt can span several dsh turns
+ * (tool-call loops); every stream frame of one run shares the draft id
+ * `m-p{N}` so the whole reply lands in ONE chat bubble (legacy semantics).
+ */
+const promptSeqBySession = new Map<string, number>()
+
+function promptSeqOf(sessionId: string): number {
+  return promptSeqBySession.get(sessionId) ?? 0
+}
+
+/**
+ * Translate one appended session event for one bridge target. `session` is
+ * consulted on turn end to aggregate the finished turn (text, tool calls,
+ * usage, timing) from the durable log.
+ */
+export function translateSessionEvent(session: Session, event: SessionEvent, target: BridgeTarget, broadcast: Broadcast): void {
+  switch (event.type) {
+    case 'user/message': {
+      // New visible prompt → bump the run counter; its stream frames reuse it.
+      if ((event.data.source as { kind?: string } | undefined)?.kind === 'user') {
+        promptSeqBySession.set(session.id, promptSeqOf(session.id) + 1)
+      }
+      return
+    }
+    case 'turn/start': {
+      broadcast('bot.typing', {
+        conversationId: target.conversationId,
+        botId: target.botId,
+        botName: target.botName,
+        typing: true,
+      })
+      return
+    }
+    case 'turn/end': {
+      broadcast('bot.typing', {
+        conversationId: target.conversationId,
+        botId: target.botId,
+        botName: target.botName,
+        typing: false,
+      })
+
+      // Turn failures (LLM 5xx, model_not_found, auth, …) surface as an
+      // explicit error message instead of a silent no-reply.
+      const reason = (event.data as { reason?: { kind?: string; error?: { message?: string } } }).reason
+      if (reason?.kind === 'error') {
+        broadcast('message.error', {
+          conversationId: target.conversationId,
+          botId: target.botId,
+          botName: target.botName,
+          message: reason.error?.message ?? 'LLM 调用失败',
+        })
+        return
+      }
+
+      // One dsh turn = one complete agent run (tool-call loops stay inside
+      // the turn); aggregate the prompt run and close the draft. The row id
+      // `m-p{N}` MUST match the streaming draft id so the front end can
+      // replace the draft with the final message in place.
+      const row = aggregatePrompt(session, promptSeqOf(session.id), target.botId, target.botName)
+      broadcast('message.stream', {
+        messageId: row.id,
+        conversationId: target.conversationId,
+        botId: target.botId,
+        delta: '',
+        done: true,
+        segments: row.segments,
+      })
+      if (target.emitFinal && (row.text !== '' || row.toolCalls.length > 0)) {
+        broadcast('message.created', toCreatedMessage(row, target))
+        if (target.conversation !== undefined) {
+          broadcast('conversation.updated', {
+            ...target.conversation,
+            last_message_preview: row.text.slice(0, 60),
+            last_message_at: row.time,
+          })
+        }
+      }
+      return
+    }
+    case 'assistant/chunk': {
+      const chunk = event.data.chunk
+      const draftId = `m-p${String(promptSeqOf(session.id))}`
+      if (chunk.type === 'text-delta' || chunk.type === 'reasoning-delta') {
+        broadcast('message.stream', {
+          messageId: draftId,
+          conversationId: target.conversationId,
+          botId: target.botId,
+          delta: chunk.text,
+          reasoning: chunk.type === 'reasoning-delta',
+          done: false,
+        })
+      } else if (chunk.type === 'tool-call-delta') {
+        broadcast('agent.tool.args', {
+          draftId,
+          id: chunk.id,
+          name: '',
+          argsStr: chunk.argumentsDelta,
+        })
+      }
+      return
+    }
+    case 'tool/call': {
+      broadcast('agent.tool.start', {
+        draftId: `m-p${String(promptSeqOf(session.id))}`,
+        id: event.data.callId,
+        name: event.data.name,
+        args: safeJson(event.data.arguments),
+      })
+      return
+    }
+    case 'tool/result': {
+      const block = event.data.message.content[0]
+      broadcast('agent.tool.end', {
+        draftId: `m-p${String(promptSeqOf(session.id))}`,
+        id: block?.toolCallId ?? '',
+        result: { content: block?.content ?? [], isError: block?.isError },
+        status: 'success',
+      })
+      return
+    }
+    default:
+      return
+  }
+}
+
+function eventTurn(event: SessionEvent): number {
+  const data = event.data as { turn?: unknown }
+  return typeof data.turn === 'number' ? data.turn : -1
+}
+
+function safeJson(text: string): unknown {
+  try {
+    return JSON.parse(text) as unknown
+  } catch {
+    return text
+  }
+}
+
+/**
+ * Fold one finished turn of a session log into a single chat row: the text of
+ * all its assistant messages, the ordered segment timeline (reasoning / text /
+ * tool), accumulated token usage, tool calls, and the turn's wall time.
+ */
+export function aggregateTurn(session: Session, turn: number, endedAt: number, botId: string, botName: string): ChatMessageRow {
+  const segments: ChatMessageRow['segments'] = []
+  const toolCalls: ChatMessageRow['toolCalls'] = []
+  const byCallId = new Map<string, ChatMessageRow['toolCalls'][number]>()
+  let text = ''
+  let startedAt = endedAt
+  let promptTokens = 0
+  let completionTokens = 0
+  let cachedTokens = 0
+  let aborted = false
+
+  for (const event of session.events) {
+    if (eventTurn(event) !== turn) continue
+    switch (event.type) {
+      case 'turn/start': {
+        startedAt = event.time
+        break
+      }
+      case 'tool/call': {
+        const call = { id: event.data.callId, name: event.data.name, args: safeJson(event.data.arguments) }
+        toolCalls.push(call)
+        byCallId.set(call.id, call)
+        segments.push({ type: 'tool', content: '', toolId: call.id })
+        break
+      }
+      case 'tool/result': {
+        const block = event.data.message.content[0]
+        const call = block === undefined ? undefined : byCallId.get(block.toolCallId)
+        if (call !== undefined && block !== undefined) {
+          call.result = { content: block.content, isError: block.isError ?? false }
+        }
+        break
+      }
+      case 'assistant/message': {
+        if (event.data.interrupted === true) aborted = true
+        for (const block of event.data.message.content) {
+          if (block.type === 'text') {
+            text += block.text
+            segments.push({ type: 'text', content: block.text })
+          } else if (block.type === 'reasoning') {
+            segments.push({ type: 'reasoning', content: block.text })
+          }
+        }
+        const usage = event.data.usage
+        if (usage !== undefined) {
+          // dsh usage 字段互斥：inputTokens 仅非缓存输入，缓存读/写单独计。
+          // 旧 UI 的 prompt_tokens 语义 = 全部输入（含缓存），此处对齐。
+          promptTokens += usage.inputTokens + (usage.cacheReadTokens ?? 0) + (usage.cacheWriteTokens ?? 0)
+          completionTokens += usage.outputTokens
+          cachedTokens += usage.cacheReadTokens ?? 0
+        }
+        break
+      }
+      default:
+        break
+    }
+  }
+
+  return {
+    id: `m-${String(turn)}`,
+    kind: 'assistant',
+    time: endedAt,
+    text,
+    senderId: botId,
+    senderName: botName,
+    segments,
+    toolCalls,
+    promptTokens,
+    completionTokens,
+    cachedTokens,
+    durationMs: Math.max(0, endedAt - startedAt),
+    stopReason: aborted ? 'aborted' : '',
+  }
+}
+
+/**
+ * Aggregate the ENTIRE run of the Nth user prompt of a session — all turns it
+ * triggered — into one chat row (legacy one-bubble-per-reply semantics).
+ */
+export function aggregatePrompt(session: Session, promptSeq: number, botId: string, botName: string): ChatMessageRow {
+  // Locate the seq boundary of the Nth visible user message.
+  let seen = 0
+  let startSeq = Number.NEGATIVE_INFINITY
+  for (const event of session.events) {
+    if (event.type === 'user/message' && (event.data.source as { kind?: string } | undefined)?.kind === 'user') {
+      seen += 1
+      if (seen === promptSeq) {
+        startSeq = event.seq
+        break
+      }
+    }
+  }
+
+  let text = ''
+  const segments: ChatMessageRow['segments'] = []
+  const toolCalls: ChatMessageRow['toolCalls'] = []
+  let promptTokens = 0
+  let completionTokens = 0
+  let cachedTokens = 0
+  let durationMs = 0
+  let time = 0
+
+  for (const event of session.events) {
+    if (event.seq <= startSeq || event.type !== 'turn/end') continue
+    const row = aggregateTurn(session, eventTurn(event), event.time, botId, botName)
+    text += row.text
+    segments.push(...row.segments)
+    toolCalls.push(...row.toolCalls)
+    promptTokens += row.promptTokens
+    completionTokens += row.completionTokens
+    cachedTokens += row.cachedTokens
+    durationMs += row.durationMs
+    time = row.time
+  }
+  return {
+    id: `m-p${String(promptSeq)}`,
+    kind: 'assistant',
+    time,
+    text,
+    senderId: botId,
+    senderName: botName,
+    segments,
+    toolCalls,
+    promptTokens,
+    completionTokens,
+    cachedTokens,
+    durationMs,
+    stopReason: '',
+  }
+}
+
+/**
+ * Project a private-chat session log into rich chat rows: human prompts only
+ * (plugin relays, wake notices and system reminders stay hidden) plus ONE
+ * aggregated row per user prompt (its whole multi-turn run).
+ */
+export function renderPrivateHistory(session: Session, botId: string, botName: string): ChatMessageRow[] {
+  const rows: ChatMessageRow[] = []
+  const lastTurnEndByPrompt = new Map<number, number>()
+  let promptSeq = 0
+
+  for (const event of session.events) {
+    switch (event.type) {
+      case 'user/message': {
+        if ((event.data.source as { kind?: string } | undefined)?.kind !== 'user') break
+        promptSeq += 1
+        const text = event.data.content
+          .filter(block => block.type === 'text')
+          .map(block => block.text)
+          .join('')
+        if (text === '') break
+        rows.push({
+          id: `u-${String(event.seq)}`,
+          kind: 'user',
+          time: event.time,
+          text,
+          senderId: 'me',
+          senderName: 'me',
+          segments: [{ type: 'text', content: text }],
+          toolCalls: [],
+          promptTokens: 0,
+          completionTokens: 0,
+          cachedTokens: 0,
+          durationMs: 0,
+          stopReason: '',
+        })
+        break
+      }
+      case 'turn/end': {
+        // 一个 dsh turn = 一次完整 run；取该 prompt 的最后一个 turn/end
+        // 聚合（若罕见的中间 turn/end 出现，后面的会覆盖——用 Map 去重）
+        lastTurnEndByPrompt.set(promptSeq, event.seq)
+        break
+      }
+      default:
+        break
+    }
+  }
+
+  // 第二遍：每个 prompt 的最后 turn/end 落一次聚合行（顺序插入）
+  const mergedByPrompt = new Map<number, ChatMessageRow>()
+  for (const [seq, endSeq] of lastTurnEndByPrompt) {
+    const endEvent = session.events.find(e => e.seq === endSeq)
+    if (endEvent === undefined) continue
+    const row = aggregatePrompt(session, seq, botId, botName)
+    if (row.text === '' && row.toolCalls.length === 0) continue
+    mergedByPrompt.set(seq, row)
+  }
+
+  // 重排：user 行已在 rows 中，按 prompt 序交错插入聚合行
+  const finalRows: ChatMessageRow[] = []
+  let promptCursor = 0
+  for (const row of rows) {
+    finalRows.push(row)
+    promptCursor += 1
+    const merged = mergedByPrompt.get(promptCursor)
+    if (merged !== undefined) finalRows.push(merged)
+  }
+  // 末尾可能还有未配对 user 行的聚合（理论上不存在，防御）
+  for (let seq = promptCursor + 1; seq <= lastTurnEndByPrompt.size; seq++) {
+    const merged = mergedByPrompt.get(seq)
+    if (merged !== undefined) finalRows.push(merged)
+  }
+  return finalRows
+}

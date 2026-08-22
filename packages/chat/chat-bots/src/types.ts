@@ -34,6 +34,12 @@ export interface BotRecord {
   readonly trigger: TriggerConfig
   /** The persistent per-bot session identity (bot memory). */
   readonly sessionId: SessionId
+  /** Soft-delete tombstone: deleted bots keep their session history. */
+  readonly deletedAt?: number | undefined
+  /** Bot self-introduction line (conversation list subtitle). */
+  readonly introduction?: string | undefined
+  /** Per-bot agent workspace directory, when agent mode is on. */
+  readonly workspaceDir?: string | undefined
   readonly createdAt: number
   readonly updatedAt: number
 }

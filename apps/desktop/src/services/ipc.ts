@@ -1,5 +1,5 @@
 import { t } from '../i18n'
-import { dshEvents, dshGet, dshRpc, dshSend } from './transport/dsh'
+import { dshChatEvents, dshEvents, dshGet, dshSend } from './transport/dsh'
 
 /** CLI 事件帧 */
 export interface IpcEventFrame {
@@ -32,6 +32,11 @@ interface DshBot {
   persona: string
   provider: string
   model: string
+  modelId?: string | null
+  agentEnabled?: number
+  introduction?: string | null
+  workspaceDir?: string | null
+  deletedAt?: number | null
   trigger: DshTrigger
   sessionId: string
   createdAt: number
@@ -48,13 +53,29 @@ interface DshGroup {
   updatedAt: number
 }
 
+interface DshToolCallRow {
+  id: string
+  name: string
+  args?: unknown
+  result?: { content?: Array<{ type: string; text?: string }>; isError?: boolean }
+  isError?: boolean
+}
+
 interface DshMessageRow {
-  seq: number
+  id?: string
+  seq?: number
   time: number
   kind: 'user' | 'bot' | 'assistant'
   senderId: string
   senderName: string
   text: string
+  segments?: Array<{ type: 'reasoning' | 'text' | 'tool'; content: string; toolId?: string }>
+  toolCalls?: DshToolCallRow[]
+  promptTokens?: number
+  completionTokens?: number
+  cachedTokens?: number
+  durationMs?: number
+  stopReason?: string
 }
 
 // ── 形状映射 ────────────────────────────────────────────────────────────────
@@ -90,9 +111,9 @@ function toFrontBot(bot: DshBot): FrontBot {
     trigger_config: toFrontTrigger(bot.trigger),
     model_provider: bot.provider,
     model_name: bot.model,
-    model_id: null,
-    agent_enabled: 0,
-    workspace_dir: null,
+    model_id: bot.modelId ?? null,
+    agent_enabled: bot.agentEnabled ?? 0,
+    workspace_dir: bot.workspaceDir ?? null,
     enabled_tools: [],
     skill_dirs: [],
     enabled_skills: [],
@@ -126,7 +147,7 @@ function botIdOfPrivate(conversationId: string): string {
 function toFrontMessage(row: DshMessageRow, conversationId: string): FrontMessage {
   const isSelf = row.kind === 'user'
   return {
-    id: `${conversationId}:${String(row.seq)}`,
+    id: row.id ?? `${conversationId}:${String(row.seq ?? row.time)}`,
     conversation_id: conversationId,
     sender_type: isSelf ? 'user' : 'ai_bot',
     sender_id: row.senderId,
@@ -135,6 +156,19 @@ function toFrontMessage(row: DshMessageRow, conversationId: string): FrontMessag
     content_type: 'text',
     is_self: isSelf ? 1 : 0,
     created_at: row.time,
+    segments: row.segments,
+    tool_calls: row.toolCalls?.map(call => ({
+      id: call.id,
+      name: call.name,
+      args: call.args,
+      result: call.result,
+      isError: call.isError ?? call.result?.isError ?? false,
+    })),
+    prompt_tokens: row.promptTokens ?? 0,
+    completion_tokens: row.completionTokens ?? 0,
+    cached_tokens: row.cachedTokens ?? 0,
+    duration_ms: row.durationMs ?? 0,
+    stop_reason: row.stopReason ?? '',
   }
 }
 
@@ -182,32 +216,45 @@ export class DshTransport implements IpcTransport {
 
     // ── conversation（私聊 = bot 会话；群聊 = /chatapi/groups）──
     if (method === 'conversation.list') {
-      const [bots, groups] = await Promise.all([
+      const [bots, groups, previews, groupPreviews] = await Promise.all([
         dshGet<{ items: DshBot[] }>('/chatapi/bots'),
         dshGet<{ items: DshGroup[] }>('/chatapi/groups'),
+        dshSend<{ previews: Record<string, { preview: string; at: number }> }>('POST', '/chatapi/misc', { action: 'conversation-previews' }).catch(() => ({ previews: {} })),
+        dshSend<{ previews: Record<string, { preview: string; at: number }> }>('POST', '/chatapi/group-misc', { action: 'conversation-previews' }).catch(() => ({ previews: {} })),
       ])
-      const privates: FrontConversation[] = bots.items.map(bot => ({
-        id: privateConversationId(bot.id),
-        type: 'private',
-        name: bot.name,
-        avatar: bot.avatar ?? null,
-        introduction: '',
-        last_message_preview: null,
-        last_message_at: bot.updatedAt,
-        unread_count: 0,
-        created_at: bot.createdAt,
-      }))
-      const groupList: FrontConversation[] = groups.items.map(group => ({
-        id: group.id,
-        type: 'group',
-        name: group.name,
-        avatar: group.avatar ?? null,
-        introduction: '',
-        last_message_preview: null,
-        last_message_at: group.updatedAt,
-        unread_count: 0,
-        created_at: group.createdAt,
-      }))
+      const mergedPreviews = { ...previews.previews, ...groupPreviews.previews }
+      const previewOf = (id: string): { preview: string | null; at: number | null } => {
+        const hit = mergedPreviews[id]
+        return hit === undefined ? { preview: null, at: null } : { preview: hit.preview, at: hit.at }
+      }
+      const privates: FrontConversation[] = bots.items.map((bot) => {
+        const hit = previewOf(privateConversationId(bot.id))
+        return {
+          id: privateConversationId(bot.id),
+          type: 'private',
+          name: bot.name,
+          avatar: bot.avatar ?? null,
+          introduction: bot.introduction ?? '',
+          last_message_preview: hit.preview,
+          last_message_at: hit.at ?? bot.updatedAt,
+          unread_count: 0,
+          created_at: bot.createdAt,
+        }
+      })
+      const groupList: FrontConversation[] = groups.items.map((group) => {
+        const hit = previewOf(group.id)
+        return {
+          id: group.id,
+          type: 'group',
+          name: group.name,
+          avatar: group.avatar ?? null,
+          introduction: '',
+          last_message_preview: hit.preview,
+          last_message_at: hit.at ?? group.updatedAt,
+          unread_count: 0,
+          created_at: group.createdAt,
+        }
+      })
       return [...groupList, ...privates] as T
     }
     if (method === 'conversation.createPrivate') {
@@ -316,7 +363,12 @@ export class DshTransport implements IpcTransport {
       return { ok: true, stopped: false } as T
     }
     if (method === 'message.clear') {
-      // TODO(M2): 群容器会话重建
+      const conversationId = String(params.conversationId ?? '')
+      if (conversationId.startsWith('private:')) {
+        await dshSend('POST', `/chatapi/bots/${encodeURIComponent(conversationId.slice('private:'.length))}/clear`)
+      } else {
+        await dshSend('POST', `/chatapi/groups/${encodeURIComponent(conversationId)}/clear`)
+      }
       return undefined as T
     }
 
@@ -329,28 +381,38 @@ export class DshTransport implements IpcTransport {
     if (method === 'settings.all') return this.localSettings() as T
     if (method === 'settings.defaultWorkspaceDir') return '' as T
 
-    // ── model：M2 起映射 /api/llm.providers + credentials ──
+    // ── model：/chatapi/models（storage 记录 + llm-pi-ai 路由同步）──
     if (method === 'model.list') {
-      const providers = await dshRpc<Array<Record<string, unknown>>>('llm.providers')
-      return (providers ?? []).flatMap((provider) => {
-        const models = Array.isArray(provider.models) ? provider.models as Array<Record<string, unknown>> : []
-        return models.map(model => ({
-          id: `${String(provider.id)}:${String(model.id ?? '')}`,
-          name: String(model.id ?? ''),
-          provider: String(provider.id),
-          base_url: '',
-          api_key: '',
-          model_name: String(model.id ?? ''),
-          tool_use: 1,
-          image_input: 0,
-          reasoning_mode: 0,
-          custom_protocol: 0,
-          input_ctx: '',
-          output_ctx: '',
-          created_at: 0,
-          updated_at: 0,
-        }))
-      }) as T
+      const { items } = await dshGet<{ items: Array<Record<string, unknown>> }>('/chatapi/models')
+      return items as T
+    }
+    if (method === 'model.create') {
+      const created = await dshSend<T>('POST', '/chatapi/models', params)
+      // 无默认模型时，新增模型自动设为默认
+      const record = created as Record<string, unknown> | undefined
+      const currentDefault = this.localSettings()['default_model_id']
+      if (record !== null && typeof record === 'object' && record.id !== undefined && (currentDefault === undefined || currentDefault === '')) {
+        this.setLocalSetting('default_model_id', String(record.id))
+      }
+      return created as T
+    }
+    if (method === 'model.update') {
+      const { id, ...rest } = params
+      return await dshSend<T>('PUT', `/chatapi/models/${encodeURIComponent(String(id))}`, rest)
+    }
+    if (method === 'model.delete') {
+      await dshSend('DELETE', `/chatapi/models/${encodeURIComponent(String(params.id))}`)
+      // 删除的是默认模型时，将第一个模型设为默认（无剩余模型则清空）
+      if (this.localSettings()['default_model_id'] === String(params.id ?? '')) {
+        const { items } = await dshGet<{ items: Array<{ id: string }> }>('/chatapi/models')
+        const next = items.find(m => m.id !== String(params.id ?? ''))
+        this.setLocalSetting('default_model_id', next?.id ?? '')
+      }
+      return undefined as T
+    }
+    if (method === 'model.setDefault') {
+      this.setLocalSetting('default_model_id', String(params.id ?? ''))
+      return undefined as T
     }
 
     // ── 工具：dsh 全局工具注册表投影 ──
@@ -358,9 +420,16 @@ export class DshTransport implements IpcTransport {
       const { items } = await dshGet<{ items: Array<{ name: string; label: string; description: string; source: string; available: boolean }> }>('/chatapi/tools')
       return items as T
     }
-    if (method === 'tool.openUrl' || method === 'tool.openDir') {
-      // TODO(M5): open_url 走 chat-tools 插件 remote-event；目录打开走 plugin-opener
-      throw new Error(NOT_MIGRATED)
+    if (method === 'tool.openDir') {
+      return await dshSend<T>('POST', '/chatapi/misc', { action: 'open-dir', dir: params.dir })
+    }
+    if (method === 'tool.openUrl') {
+      // 与 openDir 同一系统命令路径（open/explorer/xdg-open）
+      return await dshSend<T>('POST', '/chatapi/misc', { action: 'open-dir', dir: params.url ?? params.dir })
+    }
+    if (method === 'settings.defaultWorkspaceDir' || method === 'chat.getDefaultWorkspaceDir') {
+      const { dir } = await dshSend<{ dir: string }>('POST', '/chatapi/misc', { action: 'default-workspace-dir' })
+      return dir as T
     }
 
     // ── 技能：dsh skill 注册表（bundled + $DSH_HOME/skills + project）──
@@ -387,6 +456,11 @@ export class DshTransport implements IpcTransport {
       throw new Error(NOT_MIGRATED)
     }
 
+    // ── LLM trace：M5（trace 面板），先返回空避免控制台噪音 ──
+    if (method === 'llm.trace.list') {
+      return { items: [] } as T
+    }
+
     // ── persona 生成：M4（chat-persona-gen 插件）──
     if (method === 'persona.generate' || method === 'persona.generateSelfIntro') {
       throw new Error(NOT_MIGRATED)
@@ -405,14 +479,20 @@ export class DshTransport implements IpcTransport {
   }
 
   onEvent(handler: (frame: IpcEventFrame) => void): () => void {
-    return dshEvents((frame) => {
-      // mux 帧 → 旧事件形状的最小翻译；未识别的帧按原样透传（stores 自行忽略）
+    // chat 业务事件（SSE，legacy 事件形状）直接透传给 stores
+    const stopChat = dshChatEvents(frame => handler(frame))
+    // dsh mux 帧按原样透传（stores 自行忽略未识别帧）
+    const stopMux = dshEvents((frame) => {
       if (frame.type === 'session/projection') {
         handler({ event: 'dsh.session.projection', data: frame })
         return
       }
       handler({ event: `dsh.${frame.type}`, data: frame })
     })
+    return () => {
+      stopChat()
+      stopMux()
+    }
   }
 }
 

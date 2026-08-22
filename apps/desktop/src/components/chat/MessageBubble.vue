@@ -404,7 +404,7 @@ const usageText = computed(() => {
 <template>
   <div
     class="group flex items-start gap-2 px-5 py-0.5"
-    :class="[item.isSelf ? 'flex-row-reverse' : 'flex-row', { 'msg-in': item.animate }]"
+    :class="[item.isSelf ? 'flex-row-reverse' : 'flex-row mb-2.5', { 'msg-in': item.animate }]"
   >
     <!-- 已删除好友：灰显头像 + hover 提示「好友已删除」 -->
     <HoverTip
@@ -539,7 +539,7 @@ const usageText = computed(() => {
            仅 AI 输出内容时显示，流式时常显，结束后 hover 显示 -->
       <div
         v-if="!item.isSelf && hasOutput"
-        class="absolute -bottom-4 left-1 z-10 flex items-center gap-1.5 transition-opacity duration-150"
+        class="absolute -bottom-5 left-1 z-10 flex items-center gap-1.5 transition-opacity duration-150"
         :class="item.streaming ? 'opacity-100' : 'opacity-0 group-hover:opacity-100 pointer-events-none group-hover:pointer-events-auto'"
       >
         <button

@@ -18,6 +18,8 @@ export interface GroupRecord {
   readonly memberBotIds: readonly string[]
   /** The group container session: the shared message log the UI renders. */
   readonly sessionId: SessionId
+  /** Fixed group workspace: $DSH_HOME/workspace/groups/{uid}. */
+  readonly workspaceDir?: string | undefined
   readonly createdAt: number
   readonly updatedAt: number
 }
