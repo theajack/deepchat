@@ -188,8 +188,13 @@ export class ChatBots extends Service {
     this.registerHttp()
     // 一次性凭证镜像：把官方 DeepSeek 模型记录的 key 同步到共享
     // DEEPSEEK_API_KEY（web_search 等 dsh 内置功能读这个引用），存量记录
-    // 无需重新保存即生效。
-    void mirrorDeepSeekCredential(await this.servicesReady, this.models.list()).catch(() => {})
+    // 无需重新保存即生效。注意：不能在 init 里 await servicesReady ——
+    // settings/credentials 激活晚于 chat 插件，await 会让 chatBots 服务
+    // 永远无法激活，进而 chat-group 一直 pending 导致 boot 失败。
+    void this.servicesReady.then((servicesCtx) => {
+      const models = this.models
+      if (models !== undefined) mirrorDeepSeekCredential(servicesCtx, models.list())
+    }).catch(() => {})
     // LLM 调用追踪：拦截全部 llm/stream waterfall，供调试面板「对话信息」查看
     this.trace = new LlmTraceRecorder(this.ctx, (sessionId) => {
       const bot = sessionId === undefined ? undefined : this.botBySessionId(sessionId)
@@ -1042,6 +1047,10 @@ export class ChatBots extends Service {
 }
 
 /** Mount the bot registry. */
-export function apply(ctx: Context, config: Config): void {
-  ctx.plugin(ChatBots, config)
+export async function apply(ctx: Context, config: Config): Promise<void> {
+  // Await the nested service's activation so the entry only settles once
+  // `chatBots` is injectable. Without this, `chat-group` (which injects
+  // `chatBots`) can be observed as pending by the boot audit while this
+  // service's async init is still in flight, failing the whole boot.
+  await ctx.plugin(ChatBots, config).await()
 }

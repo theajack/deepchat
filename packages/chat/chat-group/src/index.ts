@@ -741,6 +741,8 @@ function renderHistory(session: Session): GroupMessageView[] {
 }
 
 /** Mount the group orchestration. */
-export function apply(ctx: Context, config: Config): void {
-  ctx.plugin(ChatGroup, config)
+export async function apply(ctx: Context, config: Config): Promise<void> {
+  // Await the nested service's activation so the entry only settles once
+  // `chatGroup` is injectable (same rationale as chat-bots).
+  await ctx.plugin(ChatGroup, config).await()
 }
