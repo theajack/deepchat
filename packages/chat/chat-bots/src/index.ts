@@ -8,7 +8,7 @@
 
 import { randomUUID } from 'node:crypto'
 import { spawn } from 'node:child_process'
-import { access, cp, mkdir, readdir, rm, writeFile } from 'node:fs/promises'
+import { access, cp, mkdir, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { Context } from '@deepseek-ai/cordis'
@@ -30,6 +30,8 @@ import { type ModelRecord, mirrorDeepSeekCredential, modelRecordSchema, ModelSto
 import { formatInstalls, installGithubSkill, searchSkillsApi } from './skills-remote.ts'
 import { buildBotAgentSetup, resolveEnabledSkills } from './agent-setup.ts'
 import { LlmTraceRecorder } from './llm-trace.ts'
+import { writeBotAvatar } from './avatar.ts'
+import { configureDebugLog, debugLog, isDebugLogEnabled, tailDebugLog, DEBUG_LOG_PATH } from './debug-log.ts'
 import { renderPrivateHistory, translateSessionEvent } from './bridge.ts'
 import { defineDomain, domainTable } from '@deepseek-ai/dsh-storage-domain'
 import type { Domain } from '@deepseek-ai/dsh-storage-domain'
@@ -139,6 +141,8 @@ export class ChatBots extends Service {
 
   /** Live agent handles by bot id; disposal removes the entry. */
   private readonly handles = new Map<string, AgentHandle>()
+  /** 本地图片头像目录（与 workspace/agents 同级，按 id 命名） */
+  private readonly avatarDir = join(resolveDshHome(), 'workspace', 'agents')
 
   /** Persona-section disposers by bot id, for live persona edits. */
   private readonly personaDispose = new Map<string, () => void>()
@@ -225,6 +229,8 @@ export class ChatBots extends Service {
 
   /** Push one legacy-shaped event frame to every connected desktop client. */
   broadcast(event: string, data: unknown): void {
+    // 本地调试日志：开关开启时每个广播事件落盘（老方案 cli.log 语义迁移）
+    debugLog(event, data)
     const payload = `data: ${JSON.stringify({ event, data })}\n\n`
     for (const client of this.sseClients) {
       try {
@@ -291,8 +297,15 @@ export class ChatBots extends Service {
     const id = `bot-${randomUUID()}`
     // 每个好友固定工作目录：$DSH_HOME/workspace/agents/{uid}（对齐旧版逻辑）
     const workspaceDir = input.workspaceDir ?? join(resolveDshHome(), 'workspace', 'agents', id)
+    // 本地图片头像：dataURL 写入 botDir/avatar.<ext>，avatar 字段替换为 /chatapi/avatars/:id.<ext>
+    let avatar: string | undefined = input.avatar
+    if (typeof input.avatarData === 'string' && input.avatarData !== '') {
+      const { avatar: written } = await writeBotAvatar(workspaceDir, input.avatarData)
+      avatar = written
+    }
     const record: BotRecord = {
       ...input,
+      ...(avatar !== undefined ? { avatar } : {}),
       workspaceDir,
       trigger,
       id,
@@ -300,22 +313,31 @@ export class ChatBots extends Service {
       createdAt: now,
       updatedAt: now,
     }
+    delete (record as unknown as { avatarData?: unknown }).avatarData
     await mkdir(workspaceDir, { recursive: true })
     await this.store.table('bots').put(record.id, record)
     return record
   }
 
   /** Patch a bot; persona edits apply live, model/capability edits rebuild the agent. */
-  async update(id: string, patch: BotUpdatePatch): Promise<BotRecord> {
+  async update(id: string, patch: BotUpdatePatch & { avatarData?: string }): Promise<BotRecord> {
     const current = this.get(id)
     if (current === undefined) throw new Error(`chat-bots: bot "${id}" not found`)
     // Capability lists arriving as explicit `undefined` (a partial patch) must
     // not erase the stored values through the record spread below.
-    const sanitized: BotUpdatePatch = Object.fromEntries(
-      Object.entries(patch).filter(([, v]) => v !== undefined)) as BotUpdatePatch
+    const sanitized: BotUpdatePatch & { avatarData?: string } = Object.fromEntries(
+      Object.entries(patch).filter(([, v]) => v !== undefined)) as BotUpdatePatch & { avatarData?: string }
+    // 本地图片头像：dataURL 写入 botDir/avatar.<ext>，avatar 字段替换为 /chatapi/avatars/:id.<ext>
+    let avatarPatch: { avatar: string } | undefined
+    if (typeof sanitized.avatarData === 'string' && sanitized.avatarData !== '' && current.workspaceDir !== undefined) {
+      const { avatar } = await writeBotAvatar(current.workspaceDir, sanitized.avatarData)
+      avatarPatch = { avatar }
+    }
+    delete sanitized.avatarData
     const next: BotRecord = {
       ...current,
       ...sanitized,
+      ...(avatarPatch !== undefined ? avatarPatch : {}),
       trigger: sanitized.trigger ?? current.trigger,
       updatedAt: Date.now(),
     }
@@ -455,6 +477,46 @@ export class ChatBots extends Service {
   private registerHttp(): void {
     this.registerSseEndpoint()
 
+    // ── 本地头像文件读取（settings editor 上传后的展示）──
+    this.ctx.webServer.register({
+      kind: 'prefix',
+      path: '/chatapi/avatars',
+      handler: async (req, res) => {
+        try {
+          const match = /^\/chatapi\/avatars\/([^/]+)\/(.+)$/.exec(req.url ?? '')
+          if (match === null || match[1] === undefined || match[2] === undefined) { res.writeHead(404); res.end(); return }
+          const botId = decodeURIComponent(match[1])
+          const fileName = decodeURIComponent(match[2])
+          if (!/^bot-[a-zA-Z0-9_-]+$/.test(botId)) {
+            res.writeHead(400); res.end('bad bot id'); return
+          }
+          if (!/^avatar\.[a-z]{2,5}$/.test(fileName)) {
+            res.writeHead(400); res.end('bad file name'); return
+          }
+          const filePath = join(this.avatarDir, botId, fileName)
+          const info = await stat(filePath).catch(() => null)
+          if (info === null || !info.isFile()) {
+            res.writeHead(404); res.end('not found'); return
+          }
+          const bytes = await readFile(filePath)
+          const ext = fileName.split('.').pop()?.toLowerCase() ?? ''
+          const mime = ext === 'jpg' ? 'image/jpeg'
+            : ext === 'svg' ? 'image/svg+xml'
+              : ext === 'webp' ? 'image/webp'
+                : `image/${ext}`
+          res.writeHead(200, {
+            'content-type': mime,
+            'content-length': String(bytes.byteLength),
+            'cache-control': 'private, max-age=86400',
+          })
+          res.end(bytes)
+        } catch (error: unknown) {
+          this.ctx.logger.warn('chat-bots avatar fetch failed: %o', error)
+          res.writeHead(500); res.end(String(error))
+        }
+      },
+    })
+
     // ── llm-trace endpoints（调试面板「对话信息」窗口）──
     this.ctx.webServer.register({
       kind: 'prefix',
@@ -515,6 +577,18 @@ export class ChatBots extends Service {
             const base = join(process.env.HOME ?? '', 'chat-agent-workspace')
             await mkdir(base, { recursive: true })
             return json(200, { dir: base })
+          }
+
+          // 本地调试日志：开关实时生效（老方案 configureDebugLog 迁移）
+          if (action === 'debug-log') {
+            if (typeof body.enabled === 'boolean') configureDebugLog(body.enabled)
+            return json(200, { enabled: isDebugLogEnabled(), path: DEBUG_LOG_PATH })
+          }
+
+          // 本地调试日志：读取最近 n 行（面板预览）
+          if (action === 'debug-log-tail') {
+            const n = typeof body.lines === 'number' && body.lines > 0 ? Math.min(body.lines, 1000) : 200
+            return json(200, { tail: tailDebugLog(n), path: DEBUG_LOG_PATH })
           }
 
           // 数据目录清单：dsh home 下真实存在的存储位置（设置页「数据目录」）
@@ -590,6 +664,7 @@ export class ChatBots extends Service {
         enabledTools: strArray('enabledTools'),
         enabledSkills: strArray('enabledSkills'),
         enabledMcpServers: strArray('enabledMcpServers'),
+        ...(typeof raw.avatarData === 'string' ? { avatarData: raw.avatarData } : {}),
       }
     }
 
@@ -841,14 +916,35 @@ export class ChatBots extends Service {
         if (req.method !== 'GET') return json(res, 405, { error: 'method not allowed' })
         // 全局注册表投影（对 bot agent 还会叠加 persona/preset 作用域工具）
         const schemas = this.ctx.tools.schemas()
-        return json(res, 200, {
-          items: schemas.map(schema => ({
-            name: schema.name,
-            label: schema.name,
-            description: schema.description ?? '',
+        // 作用域工具（注册在每个 agent 的 setup 里，不在全局注册表中）：
+        // 手动补充到列表，否则工具页与白名单选择器看不到它们
+        const scoped = [
+          {
+            name: 'openUrl',
+            label: 'openUrl',
+            description: '打开指定的 URL 或本地 HTML 文件（内置浏览器或系统浏览器）',
             source: 'builtin',
             available: true,
-          })),
+          },
+          {
+            name: 'skill',
+            label: 'skill',
+            description: '加载好友已启用技能的完整说明',
+            source: 'builtin',
+            available: true,
+          },
+        ]
+        return json(res, 200, {
+          items: [
+            ...schemas.map(schema => ({
+              name: schema.name,
+              label: schema.name,
+              description: schema.description ?? '',
+              source: 'builtin',
+              available: true,
+            })),
+            ...scoped.filter(entry => !schemas.some(schema => schema.name === entry.name)),
+          ],
         })
       },
     })

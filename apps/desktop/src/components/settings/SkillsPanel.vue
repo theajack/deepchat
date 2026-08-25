@@ -1,17 +1,31 @@
 <script setup lang="ts">
-import { onMounted, ref } from "vue";
+import { computed, onMounted, ref } from "vue";
 import {
   BookOpen, Plus, RefreshCw, Trash2, ChevronDown,
-  AlertTriangle, Package, Loader2, ExternalLink,
+  AlertTriangle, Package, Loader2, ExternalLink, SearchX,
 } from "lucide-vue-next";
 import { agentApi, type SkillInfo } from "../../services/agentApi";
 import AddSkillModal from "../skills/AddSkillModal.vue";
 import ConfirmDialog from "../../utils/ConfirmDialog.vue";
+import FilterInput from "../common/FilterInput.vue";
 import { t } from "../../i18n";
 
 const skills = ref<SkillInfo[]>([]);
 const loading = ref(false);
 const error = ref("");
+const keyword = ref("");
+
+/** 实时过滤：按名称 / 描述 / 来源（大小写不敏感） */
+const filtered = computed(() => {
+  const q = keyword.value.trim().toLowerCase();
+  if (!q) return skills.value;
+  return skills.value.filter(
+    (s) =>
+      s.name.toLowerCase().includes(q) ||
+      s.description.toLowerCase().includes(q) ||
+      (s.source ?? "").toLowerCase().includes(q),
+  );
+});
 const expandedSkill = ref<string | null>(null);
 const showAdd = ref(false);
 const deletingName = ref("");
@@ -86,13 +100,15 @@ onMounted(load);
       <AlertTriangle :size="13" class="shrink-0" />{{ error }}
     </div>
 
+    <FilterInput v-model="keyword" />
+
     <div v-if="loading && !skills.length" class="flex items-center justify-center gap-2 py-10 text-[12px] text-lo">
       <Loader2 :size="14" class="animate-spin" /> {{ t("common.loading") }}
     </div>
 
     <!-- 技能列表 -->
-    <div v-else-if="skills.length" class="grid grid-cols-1 gap-2">
-      <div v-for="s in skills" :key="s.name"
+    <div v-else-if="filtered.length" class="grid grid-cols-1 gap-2">
+      <div v-for="s in filtered" :key="s.name"
         class="min-w-0 rounded-xl border border-line bg-ink-3/40 transition-colors hover:border-line-strong">
         <div class="flex items-start gap-2.5 p-2.5">
           <BookOpen :size="14" class="mt-0.5 shrink-0 text-accent" />
@@ -137,6 +153,10 @@ onMounted(load);
     </div>
 
     <!-- 空状态 -->
+    <div v-else-if="skills.length && keyword.trim()" class="flex flex-col items-center gap-2 py-10 text-center">
+      <SearchX :size="28" class="text-lo" />
+      <p class="text-[12px] text-lo">{{ t("common.noMatch") }}</p>
+    </div>
     <div v-else-if="!loading" class="flex flex-col items-center gap-2 py-10 text-center">
       <Package :size="28" class="text-lo" />
       <p class="text-[12px] text-lo">{{ t("skills.empty") }}</p>

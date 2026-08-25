@@ -3,10 +3,26 @@ import { computed, onMounted, ref } from "vue";
 import { Wrench as ToolIcon, CheckCircle, XCircle, RefreshCw } from "lucide-vue-next";
 import { agentApi, type ToolMeta } from "../../services/agentApi";
 import { t as tr } from "../../i18n";
+import FilterInput from "../common/FilterInput.vue";
 
 const tools = ref<ToolMeta[]>([]);
 const loading = ref(false);
 const error = ref("");
+const keyword = ref("");
+
+/** 实时过滤：按名称 / 标签 / 描述 / 来源（大小写不敏感） */
+const filtered = computed(() => {
+  const q = keyword.value.trim().toLowerCase();
+  if (!q) return tools.value;
+  return tools.value.filter(
+    (t) =>
+      t.name.toLowerCase().includes(q) ||
+      t.label.toLowerCase().includes(q) ||
+      t.description.toLowerCase().includes(q) ||
+      t.source.toLowerCase().includes(q) ||
+      (t.server ?? "").toLowerCase().includes(q),
+  );
+});
 
 const sourceLabel = computed<Record<string, string>>(() => ({
   builtin: tr("common.builtin"),
@@ -39,7 +55,7 @@ onMounted(() => {
 
 <template>
   <div class="flex flex-col gap-3">
-    <div class="flex items-center justify-between">
+    <div class="flex items-center justify-between gap-2">
       <span class="text-[12px] text-lo">
         {{ tr("tools.count", { count: tools.length }) }}
       </span>
@@ -49,13 +65,16 @@ onMounted(() => {
       </button>
     </div>
 
+    <FilterInput v-model="keyword" />
+
     <div v-if="error" class="rounded-lg border border-red-500/30 bg-red-500/10 p-3 text-[12px] text-red-400">
       {{ error }}
     </div>
 
     <div v-if="loading" class="text-[12px] text-lo">{{ tr("common.loading") }}</div>
+    <div v-else-if="!filtered.length" class="text-[12px] text-lo">{{ tr("common.noMatch") }}</div>
     <div v-else class="grid gap-2">
-      <div v-for="t in tools" :key="`${t.source}-${t.name}`"
+      <div v-for="t in filtered" :key="`${t.source}-${t.name}`"
         class="flex items-start gap-2.5 rounded-xl border border-line bg-ink-3/40 p-2.5">
         <ToolIcon :size="14" class="mt-0.5 shrink-0 text-accent" />
         <div class="min-w-0 flex-1">

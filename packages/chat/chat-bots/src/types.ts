@@ -55,6 +55,9 @@ export interface BotRecord {
 /** Input accepted by bot creation (identity and timestamps are minted). */
 export type BotCreateInput = Omit<BotRecord, 'id' | 'sessionId' | 'createdAt' | 'updatedAt' | 'trigger'> & {
   readonly trigger?: TriggerConfig | undefined
+  /** 本地图片头像 dataURL（base64），后端解析后写入 bot 目录，
+   *  并把 avatar 字段替换为可通过 /chatapi/avatars/:id 读取的相对 URL */
+  readonly avatarData?: string | undefined
 }
 
 /** Patch accepted by bot update; every field is optional. */

@@ -4,49 +4,41 @@ import { useBrowserStore, toWebviewUrl, type BrowserTab } from '../stores/browse
 /**
  * 原生 Webview 管理器：为每个 Tab 挂载一个真实的 Tauri Webview。
  *
+ * webview 由 Rust 侧 command（browser_create_tab）创建——只有这样才能挂载
+ * on_new_window（拦截 _blank / window.open 转为新标签）与
+ * on_document_title_changed（标题上报）等原生钩子。
+ * 外部网页的 JS 无法使用 Tauri IPC（远程 origin 被拦截），
+ * 因此不做任何页面脚本注入，全部状态由 Rust 侧事件驱动。
+ *
  * 导航控制通过 Rust 侧 command 实现：
  * - browser_back / browser_forward → history.back/forward
  * - browser_navigate → webview.navigate（追加历史）
- * - browser_reload → webview.reload
+ * - browser_reload → location.reload()
  *
  * 历史前进/后退可用性由前端维护的"逻辑历史指针"跟踪。
  */
 /** Tauri Webview 的最小结构类型（避免引入运行时 import 与 any） */
 interface ManagedWebview {
-  once(event: string, listener: (event: unknown) => void): void
   setSize(size: unknown): Promise<void>
   setPosition(position: unknown): Promise<void>
   setFocus(): Promise<void>
   close(): Promise<void>
 }
 
-interface WebviewCtor {
-  new (window: unknown, label: string, options: {
-    url: string
-    x: number
-    y: number
-    width: number
-    height: number
-    focus?: boolean
-  }): ManagedWebview
-}
-
 interface PointCtor {
   new (x: number, y: number): unknown
 }
 
-interface HostWindow {
-  label?: string
-}
-
+/** 创建中的 webview（防止并发重复创建） */
 export class WebviewManager {
   private webviews = new Map<string, ManagedWebview>()
   private container: HTMLElement | null = null
   private resizeObserver: ResizeObserver | null = null
-  private WebviewCls: WebviewCtor | null = null
   private LogicalPositionCls: PointCtor | null = null
   private LogicalSizeCls: PointCtor | null = null
-  private currentWindow: HostWindow | null = null
+  private WebviewGet: (typeof import('@tauri-apps/api/webview'))['Webview'] | null = null
+  /** 进行中的创建请求（label → promise），避免 tabs watch 与 submitAddress 并发重复创建 */
+  private pendingCreates = new Map<string, Promise<void>>()
   private debug = true
 
   private log(...args: unknown[]) {
@@ -56,16 +48,14 @@ export class WebviewManager {
   async init(container: HTMLElement) {
     this.container = container
     try {
-      const [{ getCurrentWindow }, { Webview }, { LogicalPosition, LogicalSize }] = await Promise.all([
-        import('@tauri-apps/api/window'),
+      const [{ Webview }, { LogicalPosition, LogicalSize }] = await Promise.all([
         import('@tauri-apps/api/webview'),
         import('@tauri-apps/api/dpi'),
       ])
-      this.WebviewCls = Webview as unknown as WebviewCtor
+      this.WebviewGet = Webview
       this.LogicalPositionCls = LogicalPosition
       this.LogicalSizeCls = LogicalSize
-      this.currentWindow = getCurrentWindow()
-      this.log('初始化完成', 'window.label=', this.currentWindow?.label)
+      this.log('初始化完成')
     } catch (e) {
       console.error('[WebviewManager] init 失败', e)
       return
@@ -98,60 +88,49 @@ export class WebviewManager {
     }
   }
 
-  /** 创建一个新的 webview 并加载 URL */
+  /** 创建一个新的 webview 并加载 URL（经 Rust 命令创建，挂载原生钩子） */
   async createWebview(tab: BrowserTab): Promise<void> {
-    if (!this.WebviewCls || !this.currentWindow) return
     if (this.webviews.has(tab.webviewLabel)) return
+    if (this.pendingCreates.has(tab.webviewLabel)) {
+      return this.pendingCreates.get(tab.webviewLabel)
+    }
     if (!tab.url) return
 
     const url = await toWebviewUrl(tab.url)
+    if (!url) return
     const geo = this.getGeometry()
     const store = useBrowserStore()
+    const label = tab.webviewLabel
 
-    this.log('创建 webview', { label: tab.webviewLabel, url, geo })
+    this.log('创建 webview', { label, url, geo })
 
-    try {
-      const wv = new this.WebviewCls(this.currentWindow, tab.webviewLabel, {
-        url,
-        x: geo.x,
-        y: geo.y,
-        width: geo.w,
-        height: geo.h,
-        focus: false,
-      })
+    const task = (async () => {
+      try {
+        await invoke('browser_create_tab', {
+          label,
+          url,
+          x: geo.x,
+          y: geo.y,
+          width: geo.w,
+          height: geo.h,
+        })
 
-      this.webviews.set(tab.webviewLabel, wv)
-
-      const created = await new Promise<boolean>((resolve) => {
-        let done = false
-        const finish = (ok: boolean, err?: unknown) => {
-          if (done) return
-          done = true
-          if (!ok) console.error('[WebviewManager] webview 创建失败', tab.webviewLabel, err)
-          resolve(ok)
+        // 取得 webview 句柄用于几何控制
+        if (this.WebviewGet) {
+          const wv = await this.WebviewGet.getByLabel(label)
+          if (wv) this.webviews.set(label, wv as unknown as ManagedWebview)
         }
-        wv.once('tauri://created', () => finish(true))
-        wv.once('tauri://error', (e: unknown) => finish(false, e))
-        setTimeout(() => finish(false, 'timeout'), 8000)
-      })
-
-      if (!created) {
-        this.webviews.delete(tab.webviewLabel)
+        // 加载状态由 Rust on_page_load 事件驱动（started / load）
+      } catch (e) {
+        console.error('[WebviewManager] browser_create_tab 失败', label, e)
         store.updateTab(tab.id, { loading: false })
-        return
+      } finally {
+        this.pendingCreates.delete(label)
       }
+    })()
 
-      // 注入 tab 状态上报脚本
-      await invoke('browser_install_tab_script', { label: tab.webviewLabel }).catch((e) => {
-        console.warn('[WebviewManager] install script 失败', e)
-      })
-
-      // 页面加载完成状态由 tab-state 事件驱动，此处兜底
-      setTimeout(() => store.updateTab(tab.id, { loading: false }), 1500)
-    } catch (e) {
-      console.error('[WebviewManager] new Webview 抛异常', tab.webviewLabel, e)
-      this.webviews.delete(tab.webviewLabel)
-    }
+    this.pendingCreates.set(label, task)
+    await task
   }
 
   async setActive(activeLabel: string): Promise<void> {
@@ -184,6 +163,11 @@ export class WebviewManager {
     if (!wv) return
     this.webviews.delete(label)
     await wv.close().catch(() => {})
+  }
+
+  /** 判断指定 label 的 webview 是否已创建 */
+  has(label: string): boolean {
+    return this.webviews.has(label)
   }
 
   // ============ 导航控制（通过 Rust command 驱动，不重建 webview） ============

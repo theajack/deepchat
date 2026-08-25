@@ -10,11 +10,11 @@ export type BrowserPref = 'builtin' | 'system'
 /** 独立浏览器窗口的固定标签 */
 const BROWSER_WINDOW_LABEL = 'browser'
 
-/** 获取当前默认浏览器偏好 */
+/** 获取当前默认浏览器偏好（未设置时默认 system：用操作系统默认浏览器打开） */
 export function getBrowserPref(): BrowserPref {
   const settings = useSettingsStore()
   const val = settings.values[BROWSER_PREF_KEY]
-  return val === 'system' ? 'system' : 'builtin'
+  return val === 'builtin' ? 'builtin' : 'system'
 }
 
 /** 设置默认浏览器偏好 */

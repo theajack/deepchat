@@ -281,6 +281,8 @@ export const zh: MessageDict = {
   'common.offline': '离线',
   'common.test': '测试',
   'common.loading': '加载中…',
+  'common.searchPlaceholder': '搜索…',
+  'common.noMatch': '没有匹配项',
 
   // 供应商
   'provider.custom': '自定义',
@@ -426,8 +428,10 @@ export const zh: MessageDict = {
   'debug.devToolsDesc': '打开 Web Inspector 调试当前窗口',
   'debug.devToolsOpen': '打开开发者工具',
   'debug.localLogTitle': '本地日志',
-  'debug.localLogDesc': '开启后将 CLI 运行调试信息（含模型流式分片）写入工作目录下的 cli.log（~/chat-agent-workspace/logs/cli.log）。关闭时不打印调试日志。',
+  'debug.localLogDesc': '开启后将宿主运行调试信息（消息流式事件、工具调用生命周期）写入数据目录下的 logs/debug.log。关闭时不产生任何日志写入。',
   'debug.localLogEnable': '开启本地日志',
+  'debug.localLogOpenDir': '打开日志目录',
+  'debug.localLogRefresh': '刷新日志',
 
   // 选择器
   'selector.tools': '选择该 Agent 可调用的工具',

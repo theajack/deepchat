@@ -3,6 +3,7 @@ import { computed, onMounted, reactive, ref } from "vue";
 import { Server, Plus, Trash2, RefreshCw, CheckCircle2, XCircle, Loader2 } from "lucide-vue-next";
 import { agentApi, type McpServerInfo, type McpToolInfo } from "../../services/agentApi";
 import Select from "../common/Select.vue";
+import FilterInput from "../common/FilterInput.vue";
 import { t } from "../../i18n";
 
 const servers = ref<McpServerInfo[]>([]);
@@ -10,6 +11,14 @@ const loading = ref(false);
 const showAdd = ref(false);
 const newTools = ref<McpToolInfo[]>([]);
 const testingId = ref("");
+const keyword = ref("");
+
+/** 实时过滤：按名称（大小写不敏感） */
+const filtered = computed(() => {
+  const q = keyword.value.trim().toLowerCase();
+  if (!q) return servers.value;
+  return servers.value.filter((s) => s.name.toLowerCase().includes(q));
+});
 
 const form = reactive({
   name: "",
@@ -103,6 +112,8 @@ onMounted(load);
       </div>
     </div>
 
+    <FilterInput v-model="keyword" />
+
     <div v-if="showAdd" class="grid gap-2 rounded-xl border border-line bg-ink-3/40 p-3">
       <input v-model="form.name" :placeholder="t('mcp.name')"
         class="rounded-lg border border-line bg-ink-2 px-3 py-1.5 text-[12.5px] text-hi outline-none focus:border-accent" />
@@ -127,7 +138,8 @@ onMounted(load);
     </div>
 
     <div v-if="loading" class="text-[12px] text-lo">{{ t("common.loading") }}</div>
-    <div v-for="s in servers" :key="s.id" class="rounded-xl border border-line bg-ink-3/40 p-3">
+    <p v-else-if="!filtered.length && servers.length" class="text-[12px] text-lo">{{ t("common.noMatch") }}</p>
+    <div v-for="s in filtered" :key="s.id" class="rounded-xl border border-line bg-ink-3/40 p-3">
       <div class="flex items-center gap-2">
         <Server :size="14" class="text-accent" />
         <span class="text-[13px] font-medium text-hi">{{ s.name }}</span>

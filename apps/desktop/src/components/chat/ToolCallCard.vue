@@ -117,11 +117,13 @@ const writeStream = computed(() => {
   };
 });
 
-/** 是否展示 write 工具的内容预览：仅在执行中（流式）展示，
- *  完成后随 autoExpand 折叠，由用户手动展开查看 */
+/** 是否展示 write/edit 工具的内容预览：仅在执行中（流式）展示，
+ *  完成后随 autoExpand 折叠，由用户手动展开查看。
+ *  流式初期工具名可能尚未回填，用 argsStr 中的 path 字段形状识别 */
 const showWriteContent = computed(() => {
-  if (props.name !== "write") return false;
   if (props.status !== "running") return false;
+  const knownWrite = props.name === "write" || props.name === "edit";
+  if (!knownWrite && !writeStream.value.path) return false;
   return !!writeStream.value.content;
 });
 

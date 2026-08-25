@@ -35,7 +35,7 @@ function chooseLanguage(opt: Locale) {
 
 const workspaceDir = ref("");
 const dataDirPaths = ref<Record<string, string>>({});
-const browserPref = ref<BrowserPref>("builtin");
+const browserPref = ref<BrowserPref>("system");
 
 const browserOptions = computed<{ value: BrowserPref; label: string; desc: string; icon: typeof Globe }[]>(() => [
   { value: "builtin", label: t("browser.builtin"), desc: t("browser.builtinDesc"), icon: AppWindow },

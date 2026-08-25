@@ -1,9 +1,11 @@
 <script setup lang="ts">
-import { computed, ref } from "vue";
-import { Globe, Play, Loader2, CheckCircle2, XCircle, ExternalLink, MessageSquareText, Bug, ScrollText } from "lucide-vue-next";
+import { computed, onMounted, ref } from "vue";
+import { Globe, Play, Loader2, CheckCircle2, XCircle, ExternalLink, MessageSquareText, Bug, ScrollText, FolderOpen, RefreshCw } from "lucide-vue-next";
 import { openUrl, openUrlBuiltin, openUrlSystem, type BrowserPref } from "../../utils/browser";
 import { openLlmTraceWindow } from "../../utils/llmTrace";
 import { useSettingsStore } from "../../stores/settings";
+import { chatApi } from "../../services/chatApi";
+import { agentApi } from "../../services/agentApi";
 import { t } from "../../i18n";
 
 const settings = useSettingsStore();
@@ -15,7 +17,7 @@ const result = ref<{ ok: boolean; message: string; mode?: string } | null>(null)
 
 const currentPref = (): BrowserPref => {
   const v = settings.values["default_browser"];
-  return v === "system" ? "system" : "builtin";
+  return v === "builtin" ? "builtin" : "system";
 };
 
 async function runOpenUrl(mode: "auto" | "builtin" | "system") {
@@ -85,12 +87,48 @@ const examples = computed(() => [
   { label: t("debug.example.file"), url: "file:///Users/tackchen/chat-agent-workspace/agents/c84afed5-1bf1-4465-bad9-770553277701/snake.html" },
 ]);
 
-/** 本地日志开关（持久化到 settings 表，CLI 端写入项目根目录 debug.log） */
+/** 本地日志开关（持久化到 settings，宿主端写入 dsh-home/logs/debug.log） */
 const debugLogEnabled = computed({
   get: () => settings.values["debug_log_enabled"] === "true",
   set: (v: boolean) => {
     settings.set("debug_log_enabled", v ? "true" : "false");
+    if (v) void refreshLogInfo();
   },
+});
+
+/** 宿主侧日志状态（路径 + 尾部预览） */
+const logPath = ref("");
+const logTail = ref("");
+const logLoading = ref(false);
+
+async function refreshLogInfo() {
+  logLoading.value = true;
+  try {
+    const info = await chatApi.debugLog(debugLogEnabled.value);
+    logPath.value = info.path;
+    if (debugLogEnabled.value) {
+      const res = await chatApi.debugLogTail(100);
+      logTail.value = res.tail;
+    } else {
+      logTail.value = "";
+    }
+  } catch { /* 宿主未就绪时忽略 */ } finally {
+    logLoading.value = false;
+  }
+}
+
+async function openLogDir() {
+  const info = await chatApi.debugLog();
+  const dir = info.path.replace(/\/[^/]*$/, "");
+  try {
+    await agentApi.toolOpenDir(dir);
+  } catch {
+    window.alert(`日志目录：${dir}`);
+  }
+}
+
+onMounted(() => {
+  if (debugLogEnabled.value) void refreshLogInfo();
 });
 </script>
 
@@ -214,5 +252,26 @@ const debugLogEnabled = computed({
         class="h-4 w-4 accent-accent"
       />
     </label>
+
+    <template v-if="debugLogEnabled">
+      <div class="mt-3 flex items-center gap-2">
+        <button
+          class="flex items-center gap-1.5 rounded-lg border border-line bg-ink-2 px-3 py-1.5 text-[12px] text-mid transition-colors hover:text-accent"
+          @click="openLogDir"
+        >
+          <FolderOpen :size="13" />
+          {{ t("debug.localLogOpenDir") }}
+        </button>
+        <button
+          class="flex items-center gap-1.5 rounded-lg border border-line bg-ink-2 px-3 py-1.5 text-[12px] text-mid transition-colors hover:text-accent"
+          @click="refreshLogInfo"
+        >
+          <RefreshCw :size="13" :class="logLoading ? 'animate-spin' : ''" />
+          {{ t("debug.localLogRefresh") }}
+        </button>
+      </div>
+      <p v-if="logPath" class="mt-2 break-all font-mono text-[11px] text-lo">{{ logPath }}</p>
+      <pre v-if="logTail" class="mt-2 max-h-48 overflow-auto rounded-lg border border-line bg-ink-1/60 p-2.5 font-mono text-[11px] leading-relaxed text-mid">{{ logTail }}</pre>
+    </template>
   </section>
 </template>

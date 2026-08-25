@@ -1,5 +1,5 @@
 import { t } from '../i18n'
-import { dshChatEvents, dshEvents, dshGet, dshSend } from './transport/dsh'
+import { dshBaseUrl, dshChatEvents, dshEvents, dshGet, dshSend } from './transport/dsh'
 
 /** CLI 事件帧 */
 export interface IpcEventFrame {
@@ -87,6 +87,17 @@ type FrontBot = Record<string, unknown>
 type FrontMessage = Record<string, unknown>
 type FrontConversation = Record<string, unknown>
 
+/** 把后端 avatar 字段（可能是 /chatapi/avatars/:id.ext 相对路径）补成 webview 可访问的完整 URL */
+function toFrontAvatarUrl(raw: string | null | undefined): string | null {
+  if (raw == null || raw === '') return null
+  if (/^(data:|https?:|blob:|\/)/.test(raw)) {
+    // /chatapi/avatars/* 需要拼 base URL；其他已经是绝对 / dataURL / blob
+    if (raw.startsWith('/chatapi/avatars/')) return dshBaseUrl() + raw
+    return raw
+  }
+  return raw
+}
+
 function toFrontTrigger(trigger: DshTrigger | undefined): { active_rate: number; keywords: string[]; cooldown_seconds: number } {
   return {
     active_rate: trigger?.activeRate ?? 0.3,
@@ -108,7 +119,7 @@ function toFrontBot(bot: DshBot): FrontBot {
   return {
     id: bot.id,
     name: bot.name,
-    avatar: bot.avatar ?? null,
+    avatar: toFrontAvatarUrl(bot.avatar),
     persona: bot.persona,
     skills: [],
     trigger_config: toFrontTrigger(bot.trigger),
@@ -134,9 +145,13 @@ function fromFrontBotInput(input: Record<string, unknown>): Record<string, unkno
   const enabledTools = toArray(input.enabled_tools)
   const enabledSkills = toArray(input.enabled_skills)
   const enabledMcpServers = toArray(input.enabled_mcp_servers)
+  // 本地图片头像 dataURL（区别于 dicebear 字符串 URL —— 后者以 http/data:image-dicebear? 开头，
+  // data:image/png;base64 是本地选择上传；后端会自动判断并写入 workspace/agents/<botId>/）
+  const avatarRaw = input.avatar == null ? undefined : String(input.avatar)
+  const isDataUrl = typeof avatarRaw === 'string' && avatarRaw.startsWith('data:image/')
   return {
     name: String(input.name ?? ''),
-    avatar: input.avatar == null ? undefined : String(input.avatar),
+    ...(isDataUrl ? { avatarData: avatarRaw } : { avatar: avatarRaw }),
     persona: input.persona == null ? '' : String(input.persona),
     introduction: input.introduction == null ? undefined : String(input.introduction),
     agentEnabled: Number(input.agent_enabled ?? 0) === 1,
@@ -246,7 +261,7 @@ export class DshTransport implements IpcTransport {
           id: privateConversationId(bot.id),
           type: 'private',
           name: bot.name,
-          avatar: bot.avatar ?? null,
+          avatar: toFrontAvatarUrl(bot.avatar),
           introduction: bot.introduction ?? '',
           last_message_preview: hit.preview,
           last_message_at: hit.at ?? bot.updatedAt,
@@ -278,7 +293,7 @@ export class DshTransport implements IpcTransport {
         id: privateConversationId(bot.id),
         type: 'private',
         name: bot.name,
-        avatar: bot.avatar ?? null,
+        avatar: toFrontAvatarUrl(bot.avatar),
         introduction: '',
         last_message_preview: null,
         last_message_at: bot.updatedAt,
@@ -396,7 +411,15 @@ export class DshTransport implements IpcTransport {
     // ── settings（M1 本地桥，M2 迁 dsh settings/credentials）──
     if (method === 'settings.get') return (this.localSettings()[String(params.key)] ?? null) as T
     if (method === 'settings.set') {
-      this.setLocalSetting(String(params.key), String(params.value))
+      const key = String(params.key)
+      const value = String(params.value)
+      this.setLocalSetting(key, value)
+      // 本地调试日志开关实时同步到 dsh 宿主（老方案 configureDebugLog 迁移）
+      if (key === 'debug_log_enabled') {
+        try {
+          await dshSend('POST', '/chatapi/misc', { action: 'debug-log', enabled: value === 'true' })
+        } catch { /* 宿主未就绪时忽略，下次设置再同步 */ }
+      }
       return undefined as T
     }
     if (method === 'settings.all') return this.localSettings() as T
@@ -454,6 +477,18 @@ export class DshTransport implements IpcTransport {
     }
     if (method === 'settings.dataDirs') {
       return await dshSend<T>('POST', '/chatapi/misc', { action: 'data-dirs' })
+    }
+    if (method === 'settings.debugLog') {
+      return await dshSend<T>('POST', '/chatapi/misc', {
+        action: 'debug-log',
+        ...(typeof params.enabled === 'boolean' ? { enabled: params.enabled } : {}),
+      })
+    }
+    if (method === 'settings.debugLogTail') {
+      return await dshSend<T>('POST', '/chatapi/misc', {
+        action: 'debug-log-tail',
+        ...(typeof params.lines === 'number' ? { lines: params.lines } : {}),
+      })
     }
 
     // ── 技能：dsh skill 注册表（bundled + $DSH_HOME/skills + project）──

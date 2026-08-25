@@ -59,6 +59,62 @@ export const useMessagesStore = defineStore('messages', () => {
   /** openUrl 工具参数：key = toolCallId，value = 待打开的 url 参数 */
   const openUrlArgs = new Map<string, string>()
 
+  // ── 工具参数打字机释放 ──
+  // 部分中转服务器把整个 tool_calls arguments 打包在一个大 chunk 里（文本
+  // delta 是细粒度的，工具参数不是），用户会盯着空卡片等十几秒。大块到达
+  // 后按帧渐进渲染，视觉上与真流式一致；真实小 delta 直接透传。
+  const TYPER_THRESHOLD = 120
+  interface ToolTyper { buffer: string; timer: number | undefined }
+  const toolTypers = new Map<string, ToolTyper>()
+
+  /** 释放速率：~2.5 秒内放完（每 16ms 一帧），最慢 24 字/帧 */
+  function typerTick(typer: ToolTyper, apply: (released: string) => void): void {
+    const release = Math.max(24, Math.ceil(typer.buffer.length / 150))
+    const released = typer.buffer.slice(0, release)
+    typer.buffer = typer.buffer.slice(release)
+    apply(released)
+    if (typer.buffer.length === 0) {
+      if (typer.timer !== undefined) window.clearInterval(typer.timer)
+      typer.timer = undefined
+    }
+  }
+
+  /** 大块 argsStr 进缓冲，启动打字机；返回值表示是否进入渐进模式 */
+  function feedTyper(toolId: string, chunk: string, apply: (released: string) => void): boolean {
+    if (chunk.length <= TYPER_THRESHOLD) {
+      if (chunk.length > 0) apply(chunk)
+      return false
+    }
+    let typer = toolTypers.get(toolId)
+    if (!typer) {
+      typer = { buffer: '', timer: undefined }
+      toolTypers.set(toolId, typer)
+    }
+    typer.buffer += chunk
+    if (typer.timer === undefined) {
+      const bound = typer
+      bound.timer = window.setInterval(() => typerTick(bound, apply), 16)
+    }
+    return true
+  }
+
+  /** 工具开始执行/结束时立即放完剩余缓冲（保证 args 完整） */
+  function flushTyper(toolId: string, apply: (released: string) => void): void {
+    const typer = toolTypers.get(toolId)
+    if (!typer) return
+    if (typer.timer !== undefined) window.clearInterval(typer.timer)
+    toolTypers.delete(toolId)
+    if (typer.buffer.length > 0) apply(typer.buffer)
+  }
+
+  /** 清空所有打字机（会话切换/清空时） */
+  function disposeTypers(): void {
+    for (const typer of toolTypers.values()) {
+      if (typer.timer !== undefined) window.clearInterval(typer.timer)
+    }
+    toolTypers.clear()
+  }
+
   let eventsBound = false
 
   async function load(conversationId: string) {
@@ -104,9 +160,25 @@ export const useMessagesStore = defineStore('messages', () => {
     byConv.value = { ...byConv.value, [msg.conversation_id]: [...list, msg] }
   }
 
+  /** 工具事件早于首个文本 delta 到达时创建空草稿（content 为空、segments 为空），
+   *  让工具卡片在模型生成工具参数期间即可见（如 write 大文件流式预览） */
+  function ensureStreamDraft(draftId: string, conversationId?: string, botId?: string) {
+    if (streams.value[draftId]) return
+    if (!conversationId || !botId) return
+    streams.value = {
+      ...streams.value,
+      [draftId]: {
+        draftId,
+        conversationId,
+        botId,
+        content: '',
+        segments: [],
+      },
+    }
+  }
+
   /** 将 tool 段插入流式草稿的时间线（若已存在则跳过），保证工具调用与文本按时间顺序排列 */
-  function upsertToolSegment(draftId: string, toolId: string) {
-    const draft = streams.value[draftId]
+  function upsertToolSegment(draftId: string, toolId: string) {    const draft = streams.value[draftId]
     if (!draft) return
     if (draft.segments.some(s => s.type === 'tool' && s.toolId === toolId)) return
     streams.value = {
@@ -214,33 +286,48 @@ export const useMessagesStore = defineStore('messages', () => {
           break
         }
         case 'agent.tool.args': {
-          // 模型流式输出工具参数（如 write 工具的 content），先于 tool.start 到达
-          const d = frame.data as { draftId: string; id: string; name: string; argsStr: string }
+          // 模型流式输出工具参数（如 write 工具的 content），先于 tool.start 到达。
+          // 工具调用可能早于首个文本 delta（模型先写代码再说话），此时草稿
+          // 尚未创建 —— 先按事件携带的会话信息创建空草稿，保证工具卡片立即可见
+          const d = frame.data as { draftId: string; conversationId?: string; botId?: string; id: string; name: string; argsStr: string }
           if (!d.draftId) break
+          ensureStreamDraft(d.draftId, d.conversationId, d.botId)
           const arr = toolCalls.value[d.draftId] ?? []
           let t = arr.find(x => x.id === d.id)
           if (!t) {
             t = { id: d.id, name: d.name, status: 'running', argsStr: '' }
             arr.push(t)
           }
-          t.argsStr = d.argsStr
+          // 首个 delta 携带工具名，后续为空 —— 仅回填非空值
+          if (d.name && !t.name) t.name = d.name
+          // 大块 delta 走打字机渐进释放；小 delta 直接透传
+          const append = (s: string): void => {
+            t.argsStr += s
+            toolCalls.value = { ...toolCalls.value, [d.draftId]: [...arr] }
+          }
+          feedTyper(d.id, d.argsStr, append)
           toolCalls.value = { ...toolCalls.value, [d.draftId]: [...arr] }
           upsertToolSegment(d.draftId, d.id)
           break
         }
         case 'agent.tool.start': {
-          const d = frame.data as { draftId: string; id: string; name: string; args?: unknown }
+          const d = frame.data as { draftId: string; conversationId?: string; botId?: string; id: string; name: string; args?: unknown }
           if (!d.draftId) break
+          ensureStreamDraft(d.draftId, d.conversationId, d.botId)
           const arr = toolCalls.value[d.draftId] ?? []
           const t = arr.find(x => x.id === d.id)
           if (t) {
             // 该调用可能已由更早的 tool.args 增量帧创建（那时 name 为空），
-            // 此处是权威来源：回填 name 与 args
+            // 此处是权威来源：回填 name、args 与 status（tool.args 创建时未设 status，
+            // 这里若不补 running 会导致 timeline.isActive=false → 卡片折叠）
             if (d.name) t.name = d.name
             if (d.args !== undefined) t.args = d.args
+            if (!t.status) t.status = 'running'
           } else {
             arr.push({ id: d.id, name: d.name, args: d.args, status: 'running' })
           }
+          // 工具开始执行：args 已完整，停掉打字机并放完剩余缓冲
+          flushTyper(d.id, () => {})
           toolCalls.value = { ...toolCalls.value, [d.draftId]: arr }
           upsertToolSegment(d.draftId, d.id)
           // 记录工具开始执行时间
@@ -267,6 +354,8 @@ export const useMessagesStore = defineStore('messages', () => {
           const d = frame.data as { draftId: string; id: string; name?: string; result?: ToolCall['result']; status?: ToolCall['status'] }
           const arr = toolCalls.value[d.draftId]
           const t = arr?.find(x => x.id === d.id)
+          // 工具结束：停掉打字机（args 权威值已由 tool.start 设置）
+          flushTyper(d.id, () => {})
           if (t) {
             if (d.result !== undefined) t.result = d.result
             t.status = d.status ?? 'success'
@@ -308,6 +397,8 @@ export const useMessagesStore = defineStore('messages', () => {
           // 精确迁移：只把属于该消息 draftId 的 toolCalls 迁过去
           // 避免其他 draftId 残留的工具调用被错误迁到本消息（修复截图 bug）
           if (msg.draftId && toolCalls.value[msg.draftId]) {
+            // 消息落定：停掉该草稿所有工具的打字机（args 已由 tool.start 补全）
+            for (const tc of toolCalls.value[msg.draftId]) flushTyper(tc.id, () => {})
             toolCalls.value = {
               ...omitKey(toolCalls.value, msg.draftId),
               [msg.id]: toolCalls.value[msg.draftId],
@@ -365,6 +456,7 @@ export const useMessagesStore = defineStore('messages', () => {
 
   /** 清理指定会话的所有脏草稿与 typing（兜底：done 事件丢失时使用） */
   function cleanupDrafts(conversationId: string) {
+    disposeTypers()
     if (Object.values(streams.value).some(d => d.conversationId === conversationId)) {
       streams.value = Object.fromEntries(
         Object.entries(streams.value).filter(([, d]) => d.conversationId !== conversationId))

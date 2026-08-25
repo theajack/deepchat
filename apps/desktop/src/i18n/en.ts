@@ -281,6 +281,8 @@ export const en: MessageDict = {
   'common.offline': 'Offline',
   'common.test': 'Test',
   'common.loading': 'Loading…',
+  'common.searchPlaceholder': 'Search…',
+  'common.noMatch': 'No matches',
 
   // Providers
   'provider.custom': 'Custom',
@@ -426,8 +428,10 @@ export const en: MessageDict = {
   'debug.devToolsDesc': 'Open the Web Inspector to debug the current window',
   'debug.devToolsOpen': 'Open Developer Tools',
   'debug.localLogTitle': 'Local Log',
-  'debug.localLogDesc': 'When enabled, CLI debug info (including model stream chunks) is written to cli.log under the workspace (~/chat-agent-workspace/logs/cli.log). No debug logs are printed when disabled.',
+  'debug.localLogDesc': 'When enabled, host debug info (message stream events, tool-call lifecycle) is written to logs/debug.log under the data directory. No log IO occurs when disabled.',
   'debug.localLogEnable': 'Enable local log',
+  'debug.localLogOpenDir': 'Open log directory',
+  'debug.localLogRefresh': 'Refresh log',
 
   // Selectors
   'selector.tools': 'Select tools this Agent can call',

@@ -162,10 +162,14 @@ export function translateSessionEvent(session: Session, event: SessionEvent, tar
           done: false,
         })
       } else if (chunk.type === 'tool-call-delta') {
+        // 携带 conversationId/botId 与 chunk.name（首个 delta 通常带工具名），
+        // 让前端能在首个文本 delta 之前就创建草稿并识别 write 工具
         broadcast('agent.tool.args', {
           draftId,
+          conversationId: target.conversationId,
+          botId: target.botId,
           id: chunk.id,
-          name: '',
+          name: chunk.name ?? '',
           argsStr: chunk.argumentsDelta,
         })
       }
@@ -174,6 +178,8 @@ export function translateSessionEvent(session: Session, event: SessionEvent, tar
     case 'tool/call': {
       broadcast('agent.tool.start', {
         draftId: `m-p${String(promptSeqOf(session.id))}`,
+        conversationId: target.conversationId,
+        botId: target.botId,
         id: event.data.callId,
         name: event.data.name,
         args: safeJson(event.data.arguments),
@@ -293,17 +299,19 @@ export function aggregateTurn(session: Session, turn: number, endedAt: number, b
  * triggered — into one chat row (legacy one-bubble-per-reply semantics).
  */
 export function aggregatePrompt(session: Session, promptSeq: number, botId: string, botName: string): ChatMessageRow {
-  // Locate the seq boundary of the Nth visible user message.
+  // Locate the seq boundary of the Nth visible user message, and the next
+  // one (if any). Each prompt row must only aggregate its OWN turn —
+  // without the upper bound we'd leak every subsequent user message's tool
+  // calls into the previous bubble (the "其他对话的工具调用串到当前气泡" bug).
   let seen = 0
   let startSeq = Number.NEGATIVE_INFINITY
+  let endSeq = Number.POSITIVE_INFINITY
   for (const event of session.events) {
-    if (event.type === 'user/message' && (event.data.source as { kind?: string } | undefined)?.kind === 'user') {
-      seen += 1
-      if (seen === promptSeq) {
-        startSeq = event.seq
-        break
-      }
-    }
+    if (event.type !== 'user/message') continue
+    if ((event.data.source as { kind?: string } | undefined)?.kind !== 'user') continue
+    seen += 1
+    if (seen === promptSeq) startSeq = event.seq
+    else if (seen === promptSeq + 1) { endSeq = event.seq; break }
   }
 
   let text = ''
@@ -316,7 +324,7 @@ export function aggregatePrompt(session: Session, promptSeq: number, botId: stri
   let time = 0
 
   for (const event of session.events) {
-    if (event.seq <= startSeq || event.type !== 'turn/end') continue
+    if (event.seq <= startSeq || event.seq >= endSeq || event.type !== 'turn/end') continue
     const row = aggregateTurn(session, eventTurn(event), event.time, botId, botName)
     text += row.text
     segments.push(...row.segments)

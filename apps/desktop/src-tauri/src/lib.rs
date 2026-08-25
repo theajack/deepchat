@@ -182,10 +182,11 @@ fn browser_forward(app: AppHandle, label: String) -> Result<(), String> {
 }
 
 /// 刷新当前页面
+/// 注：wry 的 webview.reload() 在部分场景不生效，改用 location.reload()
 #[tauri::command]
 fn browser_reload(app: AppHandle, label: String) -> Result<(), String> {
     let wv = find_webview(&app, &label)?;
-    wv.reload().map_err(|e| e.to_string())
+    wv.eval("location.reload()").map_err(|e| e.to_string())
 }
 
 /// 导航到指定 URL（用于地址栏跳转，会追加到 history）
@@ -203,15 +204,12 @@ fn browser_current_url(app: AppHandle, label: String) -> Result<String, String> 
     wv.url().map(|u| u.to_string()).map_err(|e| e.to_string())
 }
 
-/// 通过 JS 获取当前页面标题
+/// 通过 JS 获取当前页面标题（已废弃：标题改由 on_document_title_changed 原生上报）
+#[allow(dead_code)]
 #[tauri::command]
 fn browser_get_title(app: AppHandle, label: String) -> Result<(), String> {
     let wv = find_webview(&app, &label)?;
-    // 触发 tab 上报标题到浏览器窗口
-    wv.eval(
-        "if (window.__reportTabState) window.__reportTabState('title-request')",
-    )
-    .map_err(|e| e.to_string())
+    wv.eval("void 0").map_err(|e| e.to_string())
 }
 
 /// 打开当前窗口的开发者工具（Web Inspector）
@@ -220,65 +218,91 @@ fn open_devtools(window: tauri::WebviewWindow) {
     window.open_devtools();
 }
 
-/// 每个 Tab webview 的初始化脚本：
-/// - 页面加载完成后上报 URL / 标题 / 可后退/前进
-/// - 拦截 popstate / hashchange / DOMContentLoaded / load 事件
-/// - 通过 window.__TAURI__.event.emit 上报到 "browser" 窗口
-const TAB_INIT_SCRIPT: &str = r#"
-(function() {
-  if (window.__browserTabInjected) return;
-  window.__browserTabInjected = true;
-
-  function report(kind) {
-    try {
-      const payload = {
-        label: window.__TAURI_INTERNALS__?.metadata?.currentWebview?.label
-             || window.__TAURI__?.webview?.getCurrentWebview?.().label
-             || '',
-        url: location.href,
-        title: document.title || '',
-        canBack: history.length > 1,
-        // 简化：canForward 通过 popstate 无法准确判断，交给前端根据栈计数判断
-        canForward: false,
-        kind: kind,
-      };
-      // 通过全局事件广播到浏览器窗口
-      const emit = (window.__TAURI__?.event?.emit) || (window.__TAURI_INTERNALS__?.invoke && ((e, p) => window.__TAURI_INTERNALS__.invoke('plugin:event|emit', { event: e, payload: JSON.stringify(p) })));
-      if (emit) {
-        emit('browser:tab-state', payload);
-      }
-    } catch (e) {
-      console.warn('[browser-tab] report failed', e);
-    }
-  }
-
-  window.__reportTabState = report;
-
-  window.addEventListener('DOMContentLoaded', () => report('DOMContentLoaded'));
-  window.addEventListener('load', () => report('load'));
-  window.addEventListener('popstate', () => report('popstate'));
-  window.addEventListener('hashchange', () => report('hashchange'));
-
-  // 监听 title 变化
-  try {
-    const titleEl = document.querySelector('title');
-    if (titleEl) {
-      new MutationObserver(() => report('title-mutation')).observe(titleEl, { childList: true, characterData: true, subtree: true });
-    }
-  } catch {}
-
-  // 首次立即上报
-  setTimeout(() => report('init'), 50);
-})();
-"#;
-
-/// 供前端在创建 webview 之前，向后端注册要注入的初始化脚本。
-/// 由于 tauri webview 在 JS 创建时并不支持传入 initialization_script，
-/// 我们在创建后通过 eval 立即注入，也能覆盖到主流场景。
+/// 创建浏览器 tab webview（由前端调用，替代 JS 侧 new Webview）。
+/// 在 Rust 侧创建才能挂载 on_new_window / on_document_title_changed 等原生钩子：
+/// - 新窗口请求（target=_blank / window.open）→ 通知 browser 窗口开新标签，并拒绝原生开窗
+/// - 标题变化 → 上报 browser 窗口
 #[tauri::command]
-fn browser_install_tab_script(app: AppHandle, label: String) -> Result<(), String> {
-    let wv = find_webview(&app, &label)?;
-    wv.eval(TAB_INIT_SCRIPT).map_err(|e| e.to_string())
+fn browser_create_tab(
+    app: AppHandle,
+    label: String,
+    url: String,
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+) -> Result<(), String> {
+    use tauri::webview::{WebviewBuilder, NewWindowResponse};
+    use tauri::WebviewUrl;
+
+    let window = app
+        .get_window("browser")
+        .ok_or_else(|| "browser 窗口不存在".to_string())?;
+
+    let parsed: url::Url = url
+        .parse()
+        .map_err(|e: url::ParseError| e.to_string())?;
+
+    let emit_handle = app.clone();
+    let builder = WebviewBuilder::new(label.clone(), WebviewUrl::External(parsed))
+        .on_new_window(move |url, _features| {
+            // 页面请求新窗口（_blank / window.open）→ 转为浏览器新标签
+            let _ = emit_handle.emit_to(
+                "browser",
+                "browser:new-tab",
+                json!({ "url": url.to_string() }),
+            );
+            NewWindowResponse::Deny
+        })
+        .on_document_title_changed(move |webview, title| {
+            // 页面标题变化 → 上报 browser 窗口
+            let _ = webview.emit_to(
+                "browser",
+                "browser:tab-state",
+                json!({
+                    "label": webview.label(),
+                    "url": "",
+                    "title": title,
+                    "kind": "title",
+                }),
+            );
+        });
+
+    window
+        .add_child(
+            builder,
+            tauri::LogicalPosition::new(x, y),
+            tauri::LogicalSize::new(width, height),
+        )
+        .map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
+/// 全局页面加载钩子：对所有 webview 生效。
+/// 仅处理浏览器 tab webview（label 以 browser-tab- 开头）：
+/// Started/Finished → 向 browser 窗口上报 URL 与加载状态
+/// （不注入任何页面脚本——外部页面的 IPC 会被远程 origin 拦截，注入方案不可靠）
+fn on_page_load(webview: &tauri::Webview, payload: &tauri::webview::PageLoadPayload<'_>) {
+    use tauri::webview::PageLoadEvent;
+
+    let label = webview.label().to_string();
+    if !label.starts_with("browser-tab-") {
+        return;
+    }
+
+    let url = payload.url().to_string();
+    let kind = match payload.event() {
+        PageLoadEvent::Started => "started",
+        PageLoadEvent::Finished => "load",
+    };
+
+    // 定向上报到 browser 窗口（URL / 加载状态）
+    let _ = webview.emit_to(
+        "browser",
+        "browser:tab-state",
+        json!({ "label": label, "url": url, "title": "", "kind": kind }),
+    );
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -286,6 +310,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_http::init())
+        .on_page_load(on_page_load)
         .setup(|app| {
             #[cfg(target_os = "macos")]
             {
@@ -320,7 +345,7 @@ pub fn run() {
             browser_navigate,
             browser_current_url,
             browser_get_title,
-            browser_install_tab_script,
+            browser_create_tab,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

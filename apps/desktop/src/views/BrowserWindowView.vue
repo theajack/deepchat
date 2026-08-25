@@ -66,21 +66,24 @@ async function submitAddress() {
   if (!val) return;
   const tab = active.value;
   if (!tab) return;
-  const target = new URL(val, "https://placeholder/").toString();
-  // 规范化：用 store 的 normalizeUrl（通过 pushHistory 之前的地址）
   const { normalizeUrl } = await import("../stores/browser");
   const normalized = normalizeUrl(val);
   browser.pushHistory(tab.id, normalized);
-  browser.updateTab(tab.id, { loading: true, title: "" });
-  await manager.navigate(tab.webviewLabel, normalized);
-  void target;
+  browser.updateTab(tab.id, { title: "" });
+  setTabLoading(tab.id, true);
+  // 空 tab 尚未创建 webview：直接以新地址创建（此时无需再 navigate）
+  if (!manager.has(tab.webviewLabel)) {
+    await manager.createWebview(tab);
+  } else {
+    await manager.navigate(tab.webviewLabel, normalized);
+  }
 }
 
 async function goBack() {
   const tab = active.value;
   if (!tab || !tab.canBack) return;
   browser.moveHistory(tab.id, -1);
-  browser.updateTab(tab.id, { loading: true });
+  setTabLoading(tab.id, true);
   await manager.back(tab.webviewLabel);
 }
 
@@ -88,14 +91,14 @@ async function goForward() {
   const tab = active.value;
   if (!tab || !tab.canForward) return;
   browser.moveHistory(tab.id, 1);
-  browser.updateTab(tab.id, { loading: true });
+  setTabLoading(tab.id, true);
   await manager.forward(tab.webviewLabel);
 }
 
 async function reload() {
   const tab = active.value;
   if (!tab) return;
-  browser.updateTab(tab.id, { loading: true });
+  setTabLoading(tab.id, true);
   await manager.reload(tab.webviewLabel);
 }
 
@@ -122,8 +125,39 @@ interface TabStatePayload {
   kind: string;
 }
 
+/** 将 webview 实际加载的 asset 协议 URL 还原为 file:// 形式（与 store 历史一致） */
+function fromWebviewUrl(url: string): string {
+  const m = url.match(/^(?:asset:\/\/localhost|https?:\/\/asset\.localhost)(\/.*)$/i);
+  if (m) {
+    try {
+      return "file://" + decodeURIComponent(m[1]);
+    } catch {
+      return "file://" + m[1];
+    }
+  }
+  return url;
+}
+
 let offTabState: (() => void) | undefined;
 let offNewTab: (() => void) | undefined;
+
+/** loading 超时兜底（导航失败等场景 on_page_load 不会触发 load 事件） */
+const loadingFallbackTimers = new Map<string, number>();
+
+function setTabLoading(tabId: string, loading: boolean) {
+  browser.updateTab(tabId, { loading });
+  const timer = loadingFallbackTimers.get(tabId);
+  if (timer) window.clearTimeout(timer);
+  if (loading) {
+    loadingFallbackTimers.set(
+      tabId,
+      window.setTimeout(() => {
+        browser.updateTab(tabId, { loading: false });
+        loadingFallbackTimers.delete(tabId);
+      }, 15000),
+    );
+  }
+}
 
 onMounted(async () => {
   console.log("[BrowserWindowView] onMounted, hash=", window.location.hash);
@@ -151,22 +185,25 @@ onMounted(async () => {
     offNewTab = await listen<{ url: string }>("browser:new-tab", (e) => {
       if (e.payload?.url) browser.addTab(e.payload.url);
     });
-    // Tab webview 状态上报（URL/标题/导航）
+    // Tab webview 状态上报（Rust 侧 on_page_load / on_document_title_changed 驱动）
     offTabState = await listen<TabStatePayload>("browser:tab-state", (e) => {
       const payload = e.payload;
       if (!payload?.label) return;
       const tab = browser.tabs.find((t) => t.webviewLabel === payload.label);
       if (!tab) return;
-      // 同步 URL（跨 asset 协议的 http/https 直接使用）
+      // 同步 URL（asset 协议还原为 file://，跨协议的 http/https 直接使用）
       if (payload.url && !payload.url.startsWith("about:")) {
-        browser.syncUrl(tab.id, payload.url);
+        browser.syncUrl(tab.id, fromWebviewUrl(payload.url));
       }
       if (payload.title) {
         browser.updateTab(tab.id, { title: payload.title });
       }
-      // 页面 load 事件视为加载完成
-      if (payload.kind === "load" || payload.kind === "DOMContentLoaded") {
-        browser.updateTab(tab.id, { loading: false });
+      // 加载状态：started → 加载中；load → 完成（由 Rust 导航事件驱动）
+      if (payload.kind === "started") {
+        browser.updateTab(tab.id, { title: "" });
+        setTabLoading(tab.id, true);
+      } else if (payload.kind === "load") {
+        setTabLoading(tab.id, false);
       }
     });
   } catch (e) {
@@ -177,6 +214,8 @@ onMounted(async () => {
 onBeforeUnmount(() => {
   offNewTab?.();
   offTabState?.();
+  for (const timer of loadingFallbackTimers.values()) window.clearTimeout(timer);
+  loadingFallbackTimers.clear();
   manager.destroy();
 });
 

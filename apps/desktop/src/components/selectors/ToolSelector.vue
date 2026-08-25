@@ -2,6 +2,7 @@
 import { computed, onMounted, ref } from "vue";
 import { agentApi, type ToolMeta } from "../../services/agentApi";
 import { t } from "../../i18n";
+import FilterInput from "../common/FilterInput.vue";
 
 const props = withDefaults(
   defineProps<{ modelValue: string[]; preselectBuiltin?: boolean }>(),
@@ -11,8 +12,22 @@ const emit = defineEmits<{ "update:modelValue": [value: string[]] }>();
 
 const tools = ref<ToolMeta[]>([]);
 const loading = ref(true);
+const keyword = ref("");
 
 const selected = computed(() => new Set(props.modelValue));
+
+/** 实时过滤：按名称 / 标签 / 描述（大小写不敏感） */
+const filtered = computed(() => {
+  const q = keyword.value.trim().toLowerCase();
+  if (!q) return tools.value;
+  return tools.value.filter(
+    (t) =>
+      t.name.toLowerCase().includes(q) ||
+      t.label.toLowerCase().includes(q) ||
+      t.description.toLowerCase().includes(q) ||
+      t.source.toLowerCase().includes(q),
+  );
+});
 
 const sourceLabel = (source: string) => (source === "builtin" ? t("common.builtin") : source === "mcp" ? t("settings.mcp") : source);
 
@@ -44,11 +59,13 @@ onMounted(async () => {
 <template>
   <div>
     <p class="mb-2 text-[11px] text-lo">{{ t("selector.tools") }}</p>
+    <FilterInput v-model="keyword" class="mb-2" />
     <div v-if="loading" class="text-[12px] text-lo">{{ t("selector.loadingTools") }}</div>
     <div v-else-if="!tools.length" class="text-[12px] text-lo">{{ t("selector.noTools") }}</div>
+    <div v-else-if="!filtered.length" class="text-[12px] text-lo">{{ t("common.noMatch") }}</div>
     <div v-else class="max-h-56 overflow-y-auto pr-1">
       <label
-        v-for="t in tools"
+        v-for="t in filtered"
         :key="`${t.source}-${t.name}`"
         class="flex cursor-pointer items-center gap-2 rounded-lg px-2.5 py-1.5 transition-colors hover:bg-ink-2/60"
       >

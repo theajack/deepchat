@@ -84,6 +84,14 @@ export class ChatApi {
   allSettings(): Promise<Record<string, string>> {
     return this.t.request('settings.all')
   }
+  /** 调试面板「本地日志」：同步/查询宿主侧日志开关（含日志文件路径）。 */
+  debugLog(enabled?: boolean): Promise<{ enabled: boolean; path: string }> {
+    return this.t.request('settings.debugLog', ...(enabled === undefined ? [] : [{ enabled }]))
+  }
+  /** 读取宿主侧调试日志尾部（面板预览）。 */
+  debugLogTail(lines?: number): Promise<{ tail: string; path: string }> {
+    return this.t.request('settings.debugLogTail', ...(lines === undefined ? [] : [{ lines }]))
+  }
   getDefaultWorkspaceDir(): Promise<string> {
     return this.t.request('settings.defaultWorkspaceDir')
   }
