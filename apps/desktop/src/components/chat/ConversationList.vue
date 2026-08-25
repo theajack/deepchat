@@ -1,12 +1,13 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
-import { Plus, Search, UserX, Users } from "lucide-vue-next";
+import { Pin, Plus, Search, UserX, Users } from "lucide-vue-next";
 import { useAppStore } from "../../stores/app";
 import { useBotsStore } from "../../stores/bots";
 import { useConversationsStore } from "../../stores/conversations";
 import { useUiStore } from "../../stores/ui";
 import { formatListTime } from "../../utils/display";
 import Avatar from "../common/Avatar.vue";
+import ConfirmModal from "../common/ConfirmModal.vue";
 import ContextMenu, { type ContextMenuState } from "../common/ContextMenu.vue";
 import GroupAvatar from "../contacts/GroupAvatar.vue";
 import BotAgentBadge from "../contacts/BotAgentBadge.vue";
@@ -23,12 +24,12 @@ const ui = useUiStore();
 
 // 右键菜单状态
 const menuState = ref<ContextMenuState | null>(null);
-const menuConvId = ref<string | null>(null);
+const menuConv = ref<Conversation | null>(null);
 
 function onContextMenu(e: MouseEvent, conv: Conversation) {
   e.preventDefault();
   e.stopPropagation();
-  menuConvId.value = conv.id;
+  menuConv.value = conv;
   const isGroup = conv.type === "group";
   menuState.value = {
     x: e.clientX,
@@ -36,9 +37,7 @@ function onContextMenu(e: MouseEvent, conv: Conversation) {
     groups: [
       {
         items: [
-          { key: "pin", label: t("conv.menu.pin") },
-          { key: "mute", label: t("conv.menu.mute") },
-          { key: "markRead", label: t("conv.menu.markRead") },
+          { key: "pin", label: conversations.isPinnedTop(conv.id) ? t("conv.menu.unpin") : t("conv.menu.pin") },
         ],
       },
       {
@@ -56,27 +55,73 @@ function onContextMenu(e: MouseEvent, conv: Conversation) {
   };
 }
 
+// 二次确认弹框
+interface ConfirmState {
+  title: string;
+  message: string;
+  confirmText: string;
+  action: () => Promise<void> | void;
+}
+const confirmState = ref<ConfirmState | null>(null);
+function requestConfirm(state: ConfirmState) {
+  confirmState.value = state;
+}
+async function onConfirm() {
+  const state = confirmState.value;
+  confirmState.value = null;
+  if (state) await state.action();
+}
+
 function onMenuSelect(key: string) {
-  const convId = menuConvId.value;
-  if (!convId) return;
+  const conv = menuConv.value;
+  if (!conv) return;
   switch (key) {
     case "pin":
-      app.toast(t("conv.menu.comingSoon"));
-      break;
-    case "mute":
-      app.toast(t("conv.menu.comingSoon"));
-      break;
-    case "markRead":
-      app.toast(t("conv.menu.comingSoon"));
+      conversations.togglePinTop(conv.id);
+      app.toast(conversations.isPinnedTop(conv.id) ? t("conv.menu.pinned") : t("conv.menu.unpinned"));
       break;
     case "rename":
-      app.toast(t("conv.menu.comingSoon"));
+      if (conv.type === "group") {
+        app.openGroupEditor(conv);
+      } else {
+        const bot = botOf(conv);
+        if (bot) app.openBotEditor(bot);
+      }
       break;
     case "clear":
-      app.toast(t("conv.menu.comingSoon"));
+      requestConfirm({
+        title: t("chat.clear.title"),
+        message: t("chat.clear.message", { name: conv.name }),
+        confirmText: t("chat.clear.confirm"),
+        action: async () => {
+          await conversations.clearMessages(conv.id);
+          app.toast(t("chat.cleared"));
+        },
+      });
       break;
     case "delete":
-      app.toast(t("conv.menu.comingSoon"));
+      if (conv.type === "group") {
+        requestConfirm({
+          title: t("contacts.deleteGroup.title"),
+          message: t("contacts.deleteGroup.message", { name: conv.name }),
+          confirmText: t("common.delete"),
+          action: async () => {
+            await conversations.remove(conv.id);
+            app.toast(t("contacts.deletedGroup"));
+          },
+        });
+      } else {
+        const botId = conv.id.startsWith("private:") ? conv.id.slice("private:".length) : "";
+        requestConfirm({
+          title: t("contacts.deleteBot.title"),
+          message: t("contacts.deleteBot.message", { name: conv.name }),
+          confirmText: t("common.delete"),
+          action: async () => {
+            await bots.remove(botId);
+            app.toast(t("contacts.deletedBot", { name: conv.name }));
+          },
+        });
+      }
       break;
   }
 }
@@ -150,7 +195,10 @@ const filtered = computed(() => {
         v-for="conv in filtered"
         :key="conv.id"
         class="group relative mx-2 mb-0.5 flex cursor-pointer items-center gap-2.5 rounded-lg px-2.5 py-2.5 transition-all duration-150 hover:bg-ink-3/70"
-        :class="{ '!bg-ink-4': conv.id === conversations.activeId }"
+        :class="{
+          '!bg-ink-4': conv.id === conversations.activeId,
+          'bg-ink-3/40': conversations.isPinnedTop(conv.id) && conv.id !== conversations.activeId,
+        }"
         @click="conversations.select(conv.id)"
         @contextmenu="onContextMenu($event, conv)"
         @mouseenter="onConvEnter(conv, $event)"
@@ -177,6 +225,7 @@ const filtered = computed(() => {
         <div class="min-w-0 flex-1">
           <div class="flex items-center justify-between">
             <span class="flex min-w-0 items-center gap-1.5 text-[13px] font-medium text-hi">
+              <Pin v-if="conversations.isPinnedTop(conv.id)" :size="11" :stroke-width="2.5" class="shrink-0 text-accent" />
               <span class="truncate">{{ conv.name }}</span>
               <BotAgentBadge v-if="conv.type === 'private' && botOf(conv)" :agent-enabled="botOf(conv)!.agent_enabled" :size="13" />
               <span v-if="conv.type === 'group'" class="flex shrink-0 items-center gap-0.5 text-[10px] font-normal text-accent">
@@ -200,5 +249,14 @@ const filtered = computed(() => {
     </div>
 
     <ContextMenu :state="menuState" @close="menuState = null" @select="onMenuSelect" />
+    <ConfirmModal
+      v-if="confirmState"
+      :title="confirmState.title"
+      :message="confirmState.message"
+      :confirm-text="confirmState.confirmText"
+      danger
+      @confirm="onConfirm"
+      @close="confirmState = null"
+    />
   </aside>
 </template>

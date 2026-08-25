@@ -10,19 +10,51 @@ export const useConversationsStore = defineStore('conversations', () => {
   const activeId = ref<string | null>(null)
   /** 因「当前在聊天」而被加入会话列表的会话 id（即便暂无消息也不移除） */
   const pinned = ref<string[]>([])
+  /** 置顶会话 id（持久化到 localStorage） */
+  const PINNED_TOP_KEY = 'chat-agent:pinned-top'
+  function loadPinnedTop(): string[] {
+    try {
+      const v = JSON.parse(localStorage.getItem(PINNED_TOP_KEY) ?? '[]')
+      return Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : []
+    } catch {
+      return []
+    }
+  }
+  const pinnedTop = ref<string[]>(loadPinnedTop())
+  function persistPinnedTop() {
+    try {
+      localStorage.setItem(PINNED_TOP_KEY, JSON.stringify(pinnedTop.value))
+    } catch {
+      /* 忽略 */
+    }
+  }
   /** 群聊成员缓存（conversationId -> 成员列表），详情页按会话 id 读取 */
   const membersMap = ref<Record<string, Bot[]>>({})
 
   const active = computed(() => items.value.find(c => c.id === activeId.value) ?? null)
   const totalUnread = computed(() => items.value.reduce((sum, c) => sum + c.unread_count, 0))
 
-  /** 消息列表可见项：包含有消息记录的，或曾因聊天被打开（pinned）的会话 */
-  const chatList = computed(() =>
-    items.value.filter(c => c.last_message_at != null || pinned.value.includes(c.id)),
-  )
+  /** 消息列表可见项：包含有消息记录的，或曾因聊天被打开（pinned）的会话；置顶会话排在最前 */
+  const chatList = computed(() => {
+    const visible = items.value.filter(c => c.last_message_at != null || pinned.value.includes(c.id))
+    return [...visible].sort(
+      (a, b) => Number(pinnedTop.value.includes(b.id)) - Number(pinnedTop.value.includes(a.id)),
+    )
+  })
 
   function pin(id: string) {
     if (!pinned.value.includes(id)) pinned.value = [...pinned.value, id]
+  }
+
+  function isPinnedTop(id: string) {
+    return pinnedTop.value.includes(id)
+  }
+
+  function togglePinTop(id: string) {
+    pinnedTop.value = isPinnedTop(id)
+      ? pinnedTop.value.filter(x => x !== id)
+      : [...pinnedTop.value, id]
+    persistPinnedTop()
   }
 
   function sortItems() {
@@ -107,6 +139,8 @@ export const useConversationsStore = defineStore('conversations', () => {
     await chatApi.deleteConversation(id)
     items.value = items.value.filter(c => c.id !== id)
     pinned.value = pinned.value.filter(pid => pid !== id)
+    pinnedTop.value = pinnedTop.value.filter(pid => pid !== id)
+    persistPinnedTop()
     if (activeId.value === id) {
       activeId.value = items.value[0]?.id ?? null
       if (activeId.value) await select(activeId.value)
@@ -148,5 +182,6 @@ export const useConversationsStore = defineStore('conversations', () => {
   return {
     items, activeId, active, chatList, totalUnread, membersMap, load, select, createPrivate, createGroup,
     loadMembers, addMember, removeMember, updateGroup, remove, applyUpdate, clearMessages, syncMemberBot,
+    pinnedTop, isPinnedTop, togglePinTop,
   }
 })

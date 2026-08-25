@@ -6,8 +6,8 @@ import { useBotsStore } from "../../stores/bots";
 import { useSelfStore } from "../../stores/self";
 import { formatSeparator } from "../../utils/display";
 import MessageBubble, { type BubbleModel } from "./MessageBubble.vue";
-import ContextMenu, { type ContextMenuState } from "../common/ContextMenu.vue";
-import { t } from "../../i18n";
+// import ContextMenu, { type ContextMenuState } from "../common/ContextMenu.vue";
+// import { t } from "../../i18n";
 
 const TIME_GAP = 5 * 60 * 1000;
 
@@ -38,36 +38,36 @@ onBeforeUnmount(() => {
   bodyRef.value?.removeEventListener("scroll", onScroll);
 });
 
-// 右键菜单状态
-const menuState = ref<ContextMenuState | null>(null);
+// 右键菜单暂时停用：恢复系统默认右键能力（复制 / 选中等）
+// const menuState = ref<ContextMenuState | null>(null);
 
-function onContextMenu(e: MouseEvent, row: Row) {
-  if (row.type !== "msg") return;
-  e.preventDefault();
-  menuState.value = {
-    x: e.clientX,
-    y: e.clientY,
-    groups: [
-      {
-        items: [
-          { key: "test", label: t("menu.test") },
-          { key: "test-disabled", label: t("menu.disabled"), disabled: true },
-        ],
-      },
-      {
-        title: t("menu.more"),
-        items: [
-          { key: "danger", label: t("menu.danger"), danger: true },
-        ],
-      },
-    ],
-  };
-}
+// function onContextMenu(e: MouseEvent, row: Row) {
+//   if (row.type !== "msg") return;
+//   e.preventDefault();
+//   menuState.value = {
+//     x: e.clientX,
+//     y: e.clientY,
+//     groups: [
+//       {
+//         items: [
+//           { key: "test", label: t("menu.test") },
+//           { key: "test-disabled", label: t("menu.disabled"), disabled: true },
+//         ],
+//       },
+//       {
+//         title: t("menu.more"),
+//         items: [
+//           { key: "danger", label: t("menu.danger"), danger: true },
+//         ],
+//       },
+//     ],
+//   };
+// }
 
-function onMenuSelect(key: string) {
-  // TODO: 根据 key 分发具体操作
-  void key;
-}
+// function onMenuSelect(key: string) {
+//   // TODO: 根据 key 分发具体操作
+//   void key;
+// }
 
 const conv = computed(() => conversations.active);
 
@@ -189,10 +189,9 @@ watch(
         :item="row.model"
         :is-group="conv?.type === 'group'"
         class="my-1"
-        @contextmenu="onContextMenu($event, row)"
       />
     </template>
 
-    <ContextMenu :state="menuState" @close="menuState = null" @select="onMenuSelect" />
+    <!-- <ContextMenu :state="menuState" @close="menuState = null" @select="onMenuSelect" /> -->
   </div>
 </template>
