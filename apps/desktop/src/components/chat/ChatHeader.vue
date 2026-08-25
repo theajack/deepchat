@@ -157,14 +157,14 @@ const subText = computed(() => {
       >
         <Pencil :size="16" :stroke-width="2" />
       </button>
-      <button
+      <!-- <button
         :disabled="botDeleted"
         class="flex h-8 w-8 items-center justify-center rounded-lg text-mid transition-colors hover:bg-ink-3 hover:text-hi disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-mid"
         :title="t('chat.more')"
         @click="drawerOpen = true"
       >
         <MoreVertical :size="18" :stroke-width="2" />
-      </button>
+      </button> -->
     </div>
     <Drawer :open="drawerOpen" :title="t('chat.more')" @close="drawerOpen = false" />
     <ConfirmModal

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from "vue";
-import { Brain, Check, ChevronDown, ChevronRight, Copy } from "lucide-vue-next";
+import { Brain, Check, ChevronDown, ChevronRight, Copy, FileText } from "lucide-vue-next";
 import Avatar from "../common/Avatar.vue";
 import HoverTip from "../common/HoverTip.vue";
 import ToolCallCard from "./ToolCallCard.vue";
@@ -16,6 +16,7 @@ import { useAutoScroll } from "../../utils/useAutoScroll";
 import { getModelContextDefaults, parseContextTokens } from "../../data/modelContextDefaults";
 import { t } from "../../i18n";
 import type { StreamSegment, ToolCall } from "../../stores/messages";
+import type { MessageAttachment } from "../../types";
 
 export interface BubbleModel {
   key: string;
@@ -47,6 +48,8 @@ export interface BubbleModel {
   cachedTokens?: number;
   /** 用户主动终止（显示"已终止"标记） */
   aborted?: boolean;
+  /** 消息附件（图片 dataUrl / 文件卡片），仅本次会话发送的消息有字节 */
+  attachments?: MessageAttachment[];
 }
 
 const props = defineProps<{ item: BubbleModel; isGroup: boolean }>();
@@ -306,6 +309,13 @@ function formatTokens(n: number): string {
   return String(n);
 }
 
+/** 附件大小缩写 */
+function formatSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes}B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)}KB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)}MB`;
+}
+
 /** 时长格式化：毫秒 → "3.2s" / "<1s" */
 function formatDuration(ms: number): string {
   if (ms <= 0) return "";
@@ -405,6 +415,7 @@ const usageText = computed(() => {
   <div
     class="group flex items-start gap-0 px-5 py-0.5"
     :class="[item.isSelf ? 'flex-row-reverse' : 'flex-row mb-3', { 'msg-in': item.animate }]"
+    :data-msg-id="item.key"
   >
     <!-- 已删除好友：灰显头像 + hover 提示「好友已删除」 -->
     <HoverTip
@@ -534,6 +545,30 @@ const usageText = computed(() => {
             <span v-for="i in 3" :key="i" class="typing-dot h-1 w-1 rounded-full bg-accent" :style="{ animationDelay: `${i * 0.15}s` }" />
           </span>
         </template>
+
+        <!-- 附件展示：图片直接预览，文件显示卡片（仅本次会话发送的附件带 dataUrl） -->
+        <div v-if="item.attachments && item.attachments.length" class="mt-1.5 flex flex-wrap gap-1.5">
+          <template v-for="att in item.attachments" :key="att.name">
+            <a
+              v-if="att.kind === 'image' && att.dataUrl"
+              :href="att.dataUrl"
+              target="_blank"
+              class="block max-w-full overflow-hidden rounded-lg border border-line/50"
+            >
+              <img :src="att.dataUrl" :alt="att.name" class="max-h-52 max-w-full object-contain" />
+            </a>
+            <a
+              v-else
+              :href="att.dataUrl || undefined"
+              :download="att.name"
+              class="flex max-w-full items-center gap-2 rounded-lg border border-line/50 bg-ink-2/40 px-2 py-1.5"
+            >
+              <FileText :size="16" class="shrink-0 text-mid" />
+              <span class="truncate text-xs text-hi">{{ att.name }}</span>
+              <span class="font-num shrink-0 text-[10px] text-lo">{{ formatSize(att.size) }}</span>
+            </a>
+          </template>
+        </div>
 
       </div>
 

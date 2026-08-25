@@ -115,6 +115,7 @@ const rows = computed<Row[]>(() => {
         aborted: msg.stop_reason === "aborted",
         conversationId: msg.conversation_id,
         botId: msg.is_self === 1 ? undefined : msg.sender_id,
+        attachments: msg.attachments,
       },
     });
   });
@@ -173,6 +174,17 @@ watch(
     scrollBottom(true);
   },
   { flush: "post" },
+);
+// 搜索定位：搜索弹窗点击「定位」后，滚动到指定消息
+watch(
+  () => messages.locate,
+  (loc) => {
+    if (!loc || loc.conversationId !== conv.value?.id) return;
+    nextTick(() => {
+      const el = bodyRef.value?.querySelector<HTMLElement>(`[data-msg-id="${loc.messageId}"]`);
+      el?.scrollIntoView({ behavior: "smooth", block: "center" });
+    });
+  },
 );
 </script>
 

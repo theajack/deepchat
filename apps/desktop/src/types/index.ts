@@ -82,6 +82,16 @@ export interface MessageSegment {
   toolId?: string
 }
 
+/** 消息附件（图片 / 文件）。仅本次会话发送的附件带 dataUrl 用于本地展示，历史消息无字节 */
+export interface MessageAttachment {
+  kind: 'image' | 'file'
+  name: string
+  mediaType: string
+  size: number
+  /** 本地预览 / 下载 data URL（历史消息缺失） */
+  dataUrl?: string
+}
+
 export interface Message {
   id: string
   conversation_id: string
@@ -108,6 +118,8 @@ export interface Message {
   cached_tokens?: number
   /** 结束原因：'' 正常结束 | 'aborted' 用户主动终止 */
   stop_reason?: string
+  /** 消息附件（图片 / 文件），发送时附带，历史消息由后端投影 */
+  attachments?: MessageAttachment[]
 }
 
 /** 工具调用（对齐 CLI PersistedToolCall） */

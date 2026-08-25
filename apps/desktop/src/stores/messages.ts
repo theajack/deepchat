@@ -2,7 +2,7 @@ import { defineStore } from 'pinia'
 import { ref } from 'vue'
 import { chatApi } from '../services/chatApi'
 import { transport } from '../services/ipc'
-import type { Conversation, Message, StreamFrame, TypingFrame } from '../types'
+import type { Conversation, Message, MessageAttachment, StreamFrame, TypingFrame } from '../types'
 import { useConversationsStore } from './conversations'
 import { openUrl } from '../utils/browser'
 
@@ -44,6 +44,12 @@ function omitKey<T>(obj: Record<string, T>, key: string): Record<string, T> {
 /** 消息模块：历史消息 + 流式草稿 + typing 状态 + CLI 事件桥接 */
 export const useMessagesStore = defineStore('messages', () => {
   const byConv = ref<Record<string, Message[]>>({})
+  /** 定位请求：搜索弹窗点击「定位」后，MessageList 滚动到该消息；nonce 用于重复定位同一条消息 */
+  const locate = ref<{ conversationId: string; messageId: string; nonce: number } | null>(null)
+
+  function requestLocate(conversationId: string, messageId: string) {
+    locate.value = { conversationId, messageId, nonce: Date.now() }
+  }
   /** 进行中的流式回复，key = draftId */
   const streams = ref<Record<string, StreamDraft>>({})
   /** Agent 运行时的工具调用，key = draftId 或 messageId */
@@ -143,8 +149,13 @@ export const useMessagesStore = defineStore('messages', () => {
     segmentsCache.value = sc
   }
 
-  async function send(conversationId: string, content: string) {
-    const msg = await chatApi.sendMessage(conversationId, content)
+  async function send(
+    conversationId: string,
+    content: string,
+    images?: Array<{ mediaType: string; data: string; name?: string; size?: number }>,
+    attachments?: MessageAttachment[],
+  ) {
+    const msg = await chatApi.sendMessage(conversationId, content, images, attachments)
     append(msg)
   }
 
@@ -482,5 +493,6 @@ export const useMessagesStore = defineStore('messages', () => {
   return {
     byConv, streams, typing, toolCalls, getToolCalls, getSegments,
     load, send, stopGeneration, bindEvents, cleanupDrafts, clearLocal,
+    locate, requestLocate,
   }
 })

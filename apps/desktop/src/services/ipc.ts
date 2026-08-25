@@ -368,9 +368,16 @@ export class DshTransport implements IpcTransport {
     }
     if (method === 'message.send') {
       const conversationId = String(params.conversationId)
-      const content = String(params.content)
+      const content = String(params.content ?? '')
+      const images = Array.isArray(params.images)
+        ? (params.images as Array<{ mediaType: string; data: string; name?: string; size?: number }>)
+        : []
+      const attachments = Array.isArray(params.attachments) ? params.attachments : []
       if (conversationId.startsWith('private:')) {
-        await dshSend('POST', `/chatapi/bots/${botIdOfPrivate(conversationId)}/send`, { content })
+        await dshSend('POST', `/chatapi/bots/${botIdOfPrivate(conversationId)}/send`, {
+          content,
+          ...(images.length > 0 ? { images } : {}),
+        })
       } else {
         await dshSend('POST', `/chatapi/groups/${conversationId}/send`, { content, senderName: 'me' })
       }
@@ -384,6 +391,8 @@ export class DshTransport implements IpcTransport {
         content_type: 'text',
         is_self: 1,
         created_at: Date.now(),
+        // 本次会话发送的附件：附带 dataUrl 供本地气泡即时展示（历史消息无字节）
+        ...(attachments.length > 0 ? { attachments } : {}),
       } as T
     }
     if (method === 'message.stop') {

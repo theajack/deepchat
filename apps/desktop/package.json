@@ -10,9 +10,11 @@
     "tauri": "tauri"
   },
   "dependencies": {
+    "@emoji-mart/data": "^1.2.1",
     "@tauri-apps/api": "^2.11.1",
     "@tauri-apps/plugin-http": "^2",
     "@tauri-apps/plugin-opener": "^2",
+    "emoji-mart": "^5.6.0",
     "highlight.js": "^11.11.1",
     "lucide-vue-next": "^1.0.0",
     "marked": "^18.0.9",

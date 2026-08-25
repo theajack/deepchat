@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from "vue";
+import { FileText, X } from "lucide-vue-next";
 import { useAppStore } from "../../stores/app";
 import { useBotsStore } from "../../stores/bots";
 import { useConversationsStore } from "../../stores/conversations";
@@ -8,6 +9,8 @@ import { useModelsStore } from "../../stores/models";
 import { agentApi } from "../../services/agentApi";
 import { chatApi } from "../../services/chatApi";
 import ChatInputToolbar from "./ChatInputToolbar.vue";
+import EmojiPicker from "./EmojiPicker.vue";
+import ConversationSearchModal from "./ConversationSearchModal.vue";
 import Avatar from "../common/Avatar.vue";
 import BotAgentBadge from "../contacts/BotAgentBadge.vue";
 import type { Bot } from "../../types";
@@ -23,8 +26,122 @@ const draft = ref("");
 const boxRef = ref<HTMLTextAreaElement | null>(null);
 const footerRef = ref<HTMLElement | null>(null);
 const sending = ref(false);
+// 表情选择面板开关
+const emojiOpen = ref(false);
+// 搜索聊天记录弹窗开关
+const searchOpen = ref(false);
 // 中文输入法组合状态：组合中不响应回车发送
 const composing = ref(false);
+
+// ── 附件草稿（图片 / 文件）──────────────────────────────────────────────
+interface DraftAttachment {
+  id: string;
+  kind: "image" | "file";
+  name: string;
+  mediaType: string;
+  size: number;
+  /** 本地预览/下载 data URL（图片直接展示，文件用于下载） */
+  dataUrl: string;
+  /** 图片：纯 base64（不含 data: 前缀），发送给后端走 image 附件 */
+  base64: string;
+  /** 文本类文件：读取的文本内容，发送时作为文本块附加 */
+  textContent?: string;
+}
+const attachments = ref<DraftAttachment[]>([]);
+const imageInputRef = ref<HTMLInputElement | null>(null);
+const fileInputRef = ref<HTMLInputElement | null>(null);
+const MAX_ATTACH_SIZE = 10 * 1024 * 1024;
+
+/** 纯文本类文件扩展名（读取内容作为文本块发送） */
+const TEXT_EXTS = new Set([
+  "txt", "md", "markdown", "json", "js", "ts", "jsx", "tsx", "mjs", "cjs",
+  "py", "java", "go", "rs", "c", "h", "cpp", "hpp", "cs", "rb", "php", "swift",
+  "kt", "sh", "bash", "yml", "yaml", "toml", "xml", "html", "css", "scss", "less",
+  "vue", "sql", "csv", "log", "ini", "conf", "properties", "gradle", "cmake",
+  "makefile", "dockerfile", "gitignore", "env",
+]);
+function extOf(name: string): string {
+  const i = name.lastIndexOf(".");
+  return i < 0 ? "" : name.slice(i + 1).toLowerCase();
+}
+function isImageType(mediaType: string): boolean {
+  return mediaType.startsWith("image/");
+}
+function isTextFile(file: File): boolean {
+  if (file.type && (file.type.startsWith("text/") || file.type === "application/json" || file.type.endsWith("xml"))) return true;
+  return TEXT_EXTS.has(extOf(file.name));
+}
+
+function readAsBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = reader.result;
+      if (typeof result !== "string") return reject(new Error("read failed"));
+      // 去掉 data:<mime>;base64, 前缀，仅保留纯 base64
+      const comma = result.indexOf(",");
+      resolve(comma >= 0 ? result.slice(comma + 1) : result);
+    };
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(file);
+  });
+}
+
+async function addImageFile(file: File) {
+  if (file.size > MAX_ATTACH_SIZE) {
+    app.toast(t("attach.tooLarge"));
+    return;
+  }
+  const base64 = await readAsBase64(file);
+  const mediaType = file.type || "image/png";
+  attachments.value = [
+    ...attachments.value,
+    { id: crypto.randomUUID(), kind: "image", name: file.name, mediaType, size: file.size, dataUrl: `data:${mediaType};base64,${base64}`, base64 },
+  ];
+}
+
+async function addFile(file: File) {
+  if (file.size > MAX_ATTACH_SIZE) {
+    app.toast(t("attach.tooLarge"));
+    return;
+  }
+  if (isImageType(file.type)) return addImageFile(file);
+  if (!isTextFile(file)) {
+    app.toast(t("attach.unsupported"));
+    return;
+  }
+  const base64 = await readAsBase64(file);
+  const mediaType = file.type || "text/plain";
+  const textContent = await file.text();
+  attachments.value = [
+    ...attachments.value,
+    { id: crypto.randomUUID(), kind: "file", name: file.name, mediaType, size: file.size, dataUrl: `data:${mediaType};base64,${base64}`, base64, textContent },
+  ];
+}
+
+function onPickImages(e: Event) {
+  const input = e.target as HTMLInputElement;
+  const files = Array.from(input.files ?? []);
+  input.value = "";
+  void Promise.all(files.map(addImageFile));
+}
+
+function onPickFiles(e: Event) {
+  const input = e.target as HTMLInputElement;
+  const files = Array.from(input.files ?? []);
+  input.value = "";
+  void Promise.all(files.map(addFile));
+}
+
+function removeAttachment(id: string) {
+  attachments.value = attachments.value.filter((a) => a.id !== id);
+}
+
+function formatSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes}B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)}KB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)}MB`;
+}
 
 // footer 总高度（px），默认 165（按钮组 + 输入框 + padding），可通过上边框拖拽调整
 const footerHeight = ref(165);
@@ -153,6 +270,22 @@ async function resolveBotWorkspaceDir(): Promise<string | null> {
 
 /** 按钮组动作分发 */
 async function onToolbarAction(key: string) {
+  if (key === "emoji") {
+    emojiOpen.value = !emojiOpen.value;
+    return;
+  }
+  if (key === "image") {
+    imageInputRef.value?.click();
+    return;
+  }
+  if (key === "file") {
+    fileInputRef.value?.click();
+    return;
+  }
+  if (key === "search") {
+    searchOpen.value = true;
+    return;
+  }
   if (key === "workspace") {
     const dir = await resolveBotWorkspaceDir();
     if (!dir) {
@@ -165,6 +298,20 @@ async function onToolbarAction(key: string) {
       app.toast(t("toolbar.workspaceOpenFailed"));
     }
   }
+}
+
+/** 将表情插入到光标处（不关闭面板，允许连续选择） */
+function insertEmoji(native: string) {
+  const el = boxRef.value;
+  const start = el?.selectionStart ?? draft.value.length;
+  const end = el?.selectionEnd ?? draft.value.length;
+  draft.value = draft.value.slice(0, start) + native + draft.value.slice(end);
+  nextTick(() => {
+    if (!el) return;
+    el.focus();
+    const pos = start + native.length;
+    el.selectionStart = el.selectionEnd = pos;
+  });
 }
 
 function closeMention() {
@@ -206,11 +353,36 @@ function applyMention(member: Bot) {
 
 async function send() {
   const text = draft.value.trim();
-  if (!text || !conv.value || sending.value) return;
+  const hasAttach = attachments.value.length > 0;
+  if ((!text && !hasAttach) || !conv.value || sending.value) return;
+
+  // 文本类文件：内容拼接到正文（markdown 代码块包裹）
+  let content = text;
+  for (const att of attachments.value) {
+    if (att.kind === "file" && att.textContent) {
+      content += (content ? "\n\n" : "") + `[文件 ${att.name}]\n\`\`\`\n${att.textContent}\n\`\`\``;
+    }
+  }
+
+  // 图片走后端 image 附件
+  const images = attachments.value
+    .filter((a) => a.kind === "image")
+    .map((a) => ({ mediaType: a.mediaType, data: a.base64, name: a.name, size: a.size }));
+
+  // 本地气泡展示用附件（图片 dataUrl + 文件 dataUrl，历史消息无字节）
+  const messageAttachments = attachments.value.map((a) => ({
+    kind: a.kind,
+    name: a.name,
+    mediaType: a.mediaType,
+    size: a.size,
+    dataUrl: a.dataUrl,
+  }));
+
   sending.value = true;
   try {
-    await messages.send(conv.value.id, text);
+    await messages.send(conv.value.id, content, images, messageAttachments);
     draft.value = "";
+    attachments.value = [];
     closeMention();
   } catch (e) {
     app.toast(e instanceof Error ? e.message : String(e));
@@ -320,8 +492,48 @@ function onKeydown(e: KeyboardEvent) {
       <div v-else class="px-3 py-4 text-center text-xs text-lo">{{ t("chat.mention.empty") }}</div>
     </div>
 
+    <!-- 表情选择面板：位于输入框上方，点击面板外部自动关闭 -->
+    <!-- 永远挂载：用 v-show 控制显隐，避免反复销毁/重建 emoji-mart 自定义元素实例导致状态错乱 -->
+    <div
+      v-show="emojiOpen"
+      class="absolute bottom-full left-4 z-20 mb-2 overflow-hidden rounded-xl border border-line-strong/60 shadow-[0_12px_40px_rgba(0,0,0,0.45)] backdrop-blur-md"
+    >
+      <EmojiPicker @select="insertEmoji" @close="emojiOpen = false" />
+    </div>
+
     <!-- 顶部按钮组：占位布局，位于输入框上方 -->
     <ChatInputToolbar @action="onToolbarAction" />
+
+    <!-- 附件预览：已选图片缩略图 / 文件卡片 -->
+    <div v-if="attachments.length" class="flex flex-wrap items-center gap-2 px-1 pb-1">
+      <div
+        v-for="att in attachments"
+        :key="att.id"
+        class="relative flex max-w-56 items-center gap-2 rounded-lg border border-line bg-ink-3/40 py-1.5 pr-2 pl-1.5"
+      >
+        <img
+          v-if="att.kind === 'image'"
+          :src="att.dataUrl"
+          :alt="att.name"
+          class="h-9 w-9 shrink-0 rounded-md object-cover"
+        />
+        <div v-else class="flex h-9 w-9 shrink-0 items-center justify-center rounded-md bg-ink-2">
+          <FileText :size="17" class="text-mid" />
+        </div>
+        <div class="flex min-w-0 flex-col">
+          <span class="truncate text-xs text-hi">{{ att.name }}</span>
+          <span class="font-num text-[10px] text-lo">{{ formatSize(att.size) }}</span>
+        </div>
+        <button
+          type="button"
+          :title="t('attach.remove')"
+          class="absolute -top-1.5 -right-1.5 flex h-4 w-4 cursor-pointer items-center justify-center rounded-full bg-ink-0 text-lo transition-colors hover:text-hi"
+          @click="removeAttachment(att.id)"
+        >
+          <X :size="10" />
+        </button>
+      </div>
+    </div>
 
     <!-- 输入框（无边框，flex-1 填满剩余高度）；好友已删除时禁止输入 -->
     <textarea
@@ -337,5 +549,12 @@ function onKeydown(e: KeyboardEvent) {
       @compositionend="composing = false"
       @blur="closeMention"
     />
+
+    <!-- 隐藏文件选择框：图片 / 任意文件 -->
+    <input ref="imageInputRef" type="file" accept="image/*" multiple class="hidden" @change="onPickImages" />
+    <input ref="fileInputRef" type="file" multiple class="hidden" @change="onPickFiles" />
+
+    <!-- 搜索聊天记录弹窗 -->
+    <ConversationSearchModal v-if="searchOpen" @close="searchOpen = false" />
   </footer>
 </template>

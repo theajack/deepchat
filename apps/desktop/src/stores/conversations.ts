@@ -8,6 +8,8 @@ import { useBotsStore } from './bots'
 export const useConversationsStore = defineStore('conversations', () => {
   const items = ref<Conversation[]>([])
   const activeId = ref<string | null>(null)
+  /** 会话列表加载中（应用启动时首屏加载） */
+  const loading = ref(false)
   /** 因「当前在聊天」而被加入会话列表的会话 id（即便暂无消息也不移除） */
   const pinned = ref<string[]>([])
   /** 置顶会话 id（持久化到 localStorage） */
@@ -62,10 +64,15 @@ export const useConversationsStore = defineStore('conversations', () => {
   }
 
   async function load() {
-    items.value = await chatApi.listConversations()
-    sortItems()
-    if (!activeId.value && items.value.length > 0) {
-      await select(items.value[0].id)
+    loading.value = true
+    try {
+      items.value = await chatApi.listConversations()
+      sortItems()
+      if (!activeId.value && items.value.length > 0) {
+        await select(items.value[0].id)
+      }
+    } finally {
+      loading.value = false
     }
   }
 
@@ -124,7 +131,7 @@ export const useConversationsStore = defineStore('conversations', () => {
     upsert(updated)
   }
 
-  /** 清空会话消息记录（后端删除 + 前端同步） */
+  /** 清空会话消息记录（后端删除 + 前端同步）。仅清空记录，不从会话列表移除。 */
   async function clearMessages(id: string) {
     await chatApi.clearMessages(id)
     const { useMessagesStore } = await import('./messages')
@@ -132,6 +139,20 @@ export const useConversationsStore = defineStore('conversations', () => {
     const conv = items.value.find(c => c.id === id)
     if (conv) {
       upsert({ ...conv, last_message_preview: null, last_message_at: null, unread_count: 0 })
+    }
+  }
+
+  /** 删除会话：清空聊天记录 + 从会话列表移除（不清除群聊/好友本身） */
+  async function deleteSession(id: string) {
+    await clearMessages(id)
+    pinned.value = pinned.value.filter(pid => pid !== id)
+    pinnedTop.value = pinnedTop.value.filter(pid => pid !== id)
+    persistPinnedTop()
+    // 若删除的是当前激活会话，切换到列表里下一个会话；列表为空则回到空状态
+    if (activeId.value === id) {
+      activeId.value = null
+      const next = chatList.value[0]
+      if (next) await select(next.id)
     }
   }
 
@@ -180,8 +201,8 @@ export const useConversationsStore = defineStore('conversations', () => {
   }
 
   return {
-    items, activeId, active, chatList, totalUnread, membersMap, load, select, createPrivate, createGroup,
-    loadMembers, addMember, removeMember, updateGroup, remove, applyUpdate, clearMessages, syncMemberBot,
+    items, activeId, active, loading, chatList, totalUnread, membersMap, load, select, createPrivate, createGroup,
+    loadMembers, addMember, removeMember, updateGroup, remove, applyUpdate, clearMessages, deleteSession, syncMemberBot,
     pinnedTop, isPinnedTop, togglePinTop,
   }
 })

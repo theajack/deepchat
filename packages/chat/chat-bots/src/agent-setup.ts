@@ -106,6 +106,66 @@ function registerOpenUrlTool(agentCtx: Context, workspaceDir: string | undefined
   }))
 }
 
+/** Fetch 工具：单次响应体大小上限（字符数），超出截断并提示。 */
+const FETCH_MAX_BODY_CHARS = 50_000
+
+/** Fetch 工具：单次请求超时（毫秒）。 */
+const FETCH_TIMEOUT_MS = 15_000
+
+/**
+ * Scoped fetch tool：直接用 Node `fetch` 请求 HTTP(S) URL，返回状态码 +
+ * 响应体文本。curl 对含中文或已 URL-encoded 参数的链接常常拿不到响应体
+ * （例如 `?query=%E4%B8%8A%E6%B5%B7`），而原生 `fetch` 能正确请求并返回
+ * 内容，故此工具用于替代「bash + curl 抓链接」的用法。
+ */
+function registerFetchTool(agentCtx: Context): void {
+  agentCtx.tools.register(defineTool({
+    name: 'fetch',
+    description: '请求指定的 HTTP(S) URL 并返回响应内容（HTTP 状态码 + 响应体文本）。当需要获取某个链接或接口的返回内容时，优先使用本工具，而不要用 curl 或 bash 命令——curl 对含中文或已编码参数的 URL 可能拿不到响应体。',
+    parameters: {
+      url: { type: 'string', required: true, description: '要请求的 HTTP(S) URL' },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          url: { type: 'string' },
+          status: { type: 'integer' },
+          contentType: { type: 'string' },
+          body: { type: 'string' },
+          truncated: { type: 'boolean' },
+        },
+      },
+      render: (_args, value) => {
+        const v = value as { url: string; status: number; contentType: string; body: string; truncated: boolean }
+        const header = `Fetched ${v.url} (HTTP ${v.status}${v.contentType ? `, ${v.contentType}` : ''})\n\n`
+        const footer = v.truncated ? '\n\n(响应体过长已截断，可请求更具体的 URL 获取完整内容)' : ''
+        return [{ type: 'text', text: `${header}${v.body}${footer}` }]
+      },
+    },
+    async execute(args, exec) {
+      const raw = (args as { url: string }).url.trim()
+      if (raw === '') throw new Error('url 参数不能为空')
+      if (!/^https?:\/\//i.test(raw)) throw new Error('仅支持 http/https URL')
+      const res = await fetch(raw, {
+        signal: AbortSignal.any([exec.signal, AbortSignal.timeout(FETCH_TIMEOUT_MS)]),
+        redirect: 'follow',
+        headers: { 'user-agent': 'dsh-fetch-tool/1.0', 'accept': '*/*' },
+      })
+      const body = await res.text()
+      const truncated = body.length > FETCH_MAX_BODY_CHARS
+      return {
+        url: res.url,
+        status: res.status,
+        contentType: res.headers.get('content-type') ?? '',
+        body: truncated ? body.slice(0, FETCH_MAX_BODY_CHARS) : body,
+        truncated,
+      }
+    },
+  }))
+}
+
 /**
  * Build the agent setup callback for one bot. The returned callback is passed
  * straight to `ctx.agents.create/resume({ setup })`; it applies:
@@ -153,9 +213,27 @@ export function buildBotAgentSetup(
       text: '使用文件类工具（glob/grep/read/write 等）时，path 参数优先省略或使用相对路径——省略时默认就是你的会话工作区。不要手写工作区的长绝对路径（其中的目录名很长，极易抄错导致路径不存在）。',
     })
 
+    // 用户上传图片提示：user 消息里直接附带的图片已经在消息中（inline base64），
+    // 不在磁盘上任何可读路径里。read_image 只用于读取工作目录里已存在的图片，
+    // 不要用 read_image 重复读取用户刚发过来的图片。
+    agentCtx.systemPrompt.section({
+      name: 'chat:image-attachment',
+      order: 1,
+      text: '【重要】用户消息里直接附带的图片已经在消息中以图片块呈现（inline base64），不在工作区任何已知路径下。不要调用 read_image 重复读取用户刚刚发来的图片——模型本轮就能直接看到该图片，没有磁盘路径可读。read_image 仅用于读取工作目录里已经存在的图片文件。',
+    })
+
     // openUrl 工具（旧版 createOpenUrlTool 迁移）：校验/归一化在后端，
     // 打开方式由前端按 default_browser 设置分流（builtin/system）。
     registerOpenUrlTool(agentCtx, bot.workspaceDir)
+
+    // fetch 工具：直接用 Node fetch 抓取链接内容。curl 对含中文/已编码
+    // 参数的 URL 常拿不到响应体，故引导模型优先走 fetch 而非 bash+curl。
+    registerFetchTool(agentCtx)
+    agentCtx.systemPrompt.section({
+      name: 'chat:fetch-preference',
+      order: 1,
+      text: '当需要获取某个链接/接口的返回内容时，优先调用 `fetch` 工具，而不是用 curl 或 bash 命令（curl 对含中文或已编码参数的 URL 可能拿不到响应体）。',
+    })
 
     // 工具白名单：restrict 过滤该 agent 继承的全局工具面（未列入的工具
     // schema 不会发给模型）；本层注册的 `skill` 工具不受影响。名单为空 =

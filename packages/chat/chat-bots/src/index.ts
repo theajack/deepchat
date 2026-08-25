@@ -17,6 +17,9 @@ import z from '@deepseek-ai/schemastery'
 import type { Agent, AgentHandle } from '@deepseek-ai/dsh-agent'
 import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
+import type { ContentBlock } from '@deepseek-ai/dsh-llm'
+import { admitEncodedImages } from '@deepseek-ai/dsh-attachment'
+import type { EncodedImageAttachment } from '@deepseek-ai/dsh-attachment/types'
 import { isSkillName } from '@deepseek-ai/dsh-skill'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 // Side-effect type import: pulls in the `webServer` Context augmentation.
@@ -45,8 +48,8 @@ export type { EnabledSkillSummary } from './agent-setup.ts'
 /** Cordis plugin name. */
 export const name = 'chat-bots'
 
-/** Agent registry, tool/skill registries, settings, credentials, storage domain facility, and the HTTP carrier are required. */
-export const inject = ['agents', 'tools', 'skills', 'storageDomain', 'webServer']
+/** Agent/skill/tool registries, settings, credentials, storage domain, attachments, and HTTP are required. */
+export const inject = ['agents', 'tools', 'skills', 'storageDomain', 'webServer', 'attachments']
 
 /** Plugin config (all deployment-tunable values carry defaults). */
 export interface Config {
@@ -932,6 +935,13 @@ export class ChatBots extends Service {
             available: true,
           },
           {
+            name: 'fetch',
+            label: 'fetch',
+            description: '请求指定的 HTTP(S) URL 并返回响应内容（状态码 + 响应体）',
+            source: 'builtin',
+            available: true,
+          },
+          {
             name: 'skill',
             label: 'skill',
             description: '加载好友已启用技能的完整说明',
@@ -994,14 +1004,24 @@ export class ChatBots extends Service {
           if (action === '/send') {
             if (req.method !== 'POST') return json(res, 405, { error: 'method not allowed' })
             const body = await readBody(req)
-            if (typeof body.content !== 'string' || body.content === '') {
+            const text = typeof body.content === 'string' ? body.content : ''
+            const images = Array.isArray(body.images)
+              ? body.images.filter((img): img is EncodedImageAttachment =>
+                img !== null && typeof img === 'object'
+                && typeof (img as { data?: unknown }).data === 'string'
+                && typeof (img as { mediaType?: unknown }).mediaType === 'string')
+              : []
+            if (text === '' && images.length === 0) {
               return json(res, 400, { error: 'content is required' })
             }
+            const content: ContentBlock[] = []
+            if (text !== '') content.push({ type: 'text', text })
+            if (images.length > 0) {
+              const refs = await admitEncodedImages(this.ctx.attachments, images)
+              content.push(...refs.map((ref): ContentBlock => ({ type: 'image', attachment: ref })))
+            }
             const agent = await this.ensureAgent(botId)
-            agent.followup(createUserMessage({
-              content: [{ type: 'text', text: body.content }],
-              source: { kind: 'user' },
-            }))
+            agent.followup(createUserMessage({ content, source: { kind: 'user' } }))
             return json(res, 200, { accepted: true })
           }
 

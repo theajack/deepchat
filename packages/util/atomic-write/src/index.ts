@@ -11,7 +11,7 @@
  */
 
 import { randomBytes } from 'node:crypto'
-import { lstat, mkdir, rename, rm, writeFile } from 'node:fs/promises'
+import { lstat, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { dirname } from 'node:path'
 
 /**
@@ -77,6 +77,44 @@ async function isLockContention(error: unknown, lockPath: string): Promise<boole
   }
 }
 
+/** Whether a process with the given PID is still running. */
+function isPidAlive(pid: number): boolean {
+  if (!Number.isInteger(pid) || pid <= 0) return false
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (error) {
+    // ESRCH: no such process (dead). EPERM: exists but owned elsewhere (alive).
+    return (error as NodeJS.ErrnoException | null)?.code === 'EPERM'
+  }
+}
+
+/**
+ * Attempt to reclaim a lock whose holder is no longer running. The lock file
+ * records the holder PID (`${pid}\n`); when that PID is dead the lock is an
+ * orphan left behind by a crash or SIGKILL and is safe to remove. Returns
+ * `true` only when the orphan lock was actually removed (or already vanished),
+ * signalling the caller to retry acquisition immediately.
+ */
+async function tryBreakOrphanLock(lockPath: string): Promise<boolean> {
+  let raw: string
+  try {
+    raw = await readFile(lockPath, 'utf8')
+  } catch {
+    // Lock disappeared between our failed create and this read; retry now.
+    return true
+  }
+  const pid = Number.parseInt(raw, 10)
+  // An unreadable/empty PID means the holder has created the file but not yet
+  // written it; treat it as still contended rather than risking a removal race.
+  if (!Number.isInteger(pid) || pid <= 0) return false
+  if (!isPidAlive(pid)) {
+    await rm(lockPath, { force: true })
+    return true
+  }
+  return false
+}
+
 /**
  * Retry cadence for a contended lock. These stay robustness invariants of the
  * cross-process write protocol rather than deployment tunables: they govern how
@@ -117,9 +155,10 @@ export interface FileLockOptions {
  * contention only when a fresh `lstat` confirms the lock path exists, covering
  * Windows exclusive-create behavior without hiding an unrelated permission
  * failure. Contention backs off exponentially and fails with a timed-out error
- * after the deadline. The contender never removes an existing lock because
- * file age cannot prove that its owner stopped; orphan recovery is an operator
- * action. The parent directory must exist.
+ * after the deadline. When a contender finds an existing lock, it reads the
+ * holder PID recorded in it and reclaims the lock if that PID is no longer
+ * alive (a crash/SIGKILL orphan), so a stale lock never blocks writers for
+ * the full deadline. The parent directory must exist.
  * @param filename - the file whose writers this lock serializes.
  * @param operation - the read-render-commit cycle to run while holding the lock.
  * @param options - acquisition options; omitted waits {@link DEFAULT_LOCK_WAIT_MS}.
@@ -140,6 +179,9 @@ export async function withFileLock<T>(
     } catch (error) {
       if (!await isLockContention(error, lockPath)) throw error
     }
+    // 孤儿锁回收：锁文件记录持有者 PID，若其进程已死（崩溃/强杀遗留），
+    // 清理后立即重试，而不是等 deadline 超时让整个 boot 失败。
+    if (await tryBreakOrphanLock(lockPath)) continue
     if (Date.now() >= deadline) {
       throw new Error(`atomic-write: timed out waiting for the writer lock at ${lockPath}`)
     }

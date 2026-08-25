@@ -116,6 +116,19 @@ export const zh: MessageDict = {
   'toolbar.search': '搜索聊天记录',
   'toolbar.stop': '终止对话',
 
+  // 附件
+  'attach.remove': '移除',
+  'attach.unsupported': '暂不支持该文件类型',
+  'attach.tooLarge': '文件过大（超过 10MB）',
+
+  // 搜索聊天记录
+  'search.title': '搜索聊天记录',
+  'search.placeholder': '搜索消息内容…',
+  'search.empty': '暂无聊天记录',
+  'search.noMatch': '无匹配消息',
+  'search.locate': '定位',
+  'search.count': '共 {count} 条',
+
   // 右键菜单
   'menu.test': '测试菜单项',
   'menu.disabled': '禁用项',
@@ -142,6 +155,11 @@ export const zh: MessageDict = {
   'conv.menu.renameGroup': '编辑群聊',
   'conv.menu.renameBot': '编辑好友',
   'conv.menu.clearHistory': '清空聊天记录',
+  'conv.menu.deleteSession': '删除会话',
+  'conv.deleteSession.title': '删除会话',
+  'conv.deleteSession.message': '删除后将清空「{name}」的全部聊天记录并从会话列表移除，该操作不可恢复。',
+  'conv.deleteSession.confirm': '删除',
+  'conv.deleteSession.done': '已删除会话',
   'conv.menu.deleteGroup': '删除群聊',
   'conv.menu.deleteBot': '删除好友',
   'conv.menu.comingSoon': '功能开发中',

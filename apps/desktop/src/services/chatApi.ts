@@ -1,4 +1,4 @@
-import type { Bot, BotInput, Conversation, Message, ModelConfig, ModelInput, UpdateConversationInput } from '../types'
+import type { Bot, BotInput, Conversation, Message, MessageAttachment, ModelConfig, ModelInput, UpdateConversationInput } from '../types'
 import { transport, type IpcTransport } from './ipc'
 
 /** 类型化业务 API 门面：stores 只依赖它，不直接感知传输层（SRP + DIP） */
@@ -65,8 +65,18 @@ export class ChatApi {
   listMessages(conversationId: string, before?: number, limit = 50): Promise<Message[]> {
     return this.t.request('message.list', { conversationId, before, limit })
   }
-  sendMessage(conversationId: string, content: string): Promise<Message> {
-    return this.t.request('message.send', { conversationId, content })
+  sendMessage(
+    conversationId: string,
+    content: string,
+    images?: Array<{ mediaType: string; data: string; name?: string; size?: number }>,
+    attachments?: MessageAttachment[],
+  ): Promise<Message> {
+    return this.t.request('message.send', {
+      conversationId,
+      content,
+      ...(images && images.length > 0 ? { images } : {}),
+      ...(attachments && attachments.length > 0 ? { attachments } : {}),
+    })
   }
   stopMessage(conversationId: string, botId?: string): Promise<{ ok: boolean; stopped: boolean }> {
     return this.t.request('message.stop', { conversationId, botId })

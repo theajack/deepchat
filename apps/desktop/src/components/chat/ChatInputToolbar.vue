@@ -37,7 +37,8 @@ const actions = computed<ToolbarAction[]>(() => {
   // 禁用 Agent 能力的好友没有本地文件操作权限，不显示工作区按钮
   const showWorkspace = currentBot.value?.agent_enabled !== 0;
   return [
-    { key: "voice", title: t("toolbar.voice"), icon: Mic },
+    // 语音输入暂缓：后续接入语音识别后再放开
+    // { key: "voice", title: t("toolbar.voice"), icon: Mic },
     { key: "emoji", title: t("toolbar.emoji"), icon: SmilePlus },
     ...(showWorkspace ? [{ key: "workspace", title: t("toolbar.workspace"), icon: FolderOpen }] : []),
     { key: "image", title: t("toolbar.image"), icon: ImagePlus },
@@ -116,9 +117,12 @@ const emit = defineEmits<{
 /** 好友已删除时仍可用的按钮（历史消息仍存在，搜索有意义） */
 const ALWAYS_ENABLED_KEYS = new Set(["search"]);
 
-function onClick(key: string) {
+function onClick(key: string, e: MouseEvent) {
   // 好友已删除：除搜索聊天记录外的按钮禁用
   if (botDeleted.value && !ALWAYS_ENABLED_KEYS.has(key)) return;
+  // emoji 按钮：阻止冒泡到 document，避免 emoji-mart 的全局 onClickOutside
+  // 监听器在按钮点击时立即把刚打开的面板又关掉（picker 用 v-show 常驻挂载）
+  if (key === "emoji") e.stopPropagation();
   // 功能待补充，先仅向上层透传
   emit("action", key);
 }
@@ -133,7 +137,7 @@ function onClick(key: string) {
       class="rounded-lg p-2 text-mid transition-colors hover:bg-ink-3 hover:text-hi disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-mid"
       :title="action.title"
       type="button"
-      @click="onClick(action.key)"
+      @click="onClick(action.key, $event)"
     >
       <component :is="action.icon" :size="17" :stroke-width="2" />
     </button>

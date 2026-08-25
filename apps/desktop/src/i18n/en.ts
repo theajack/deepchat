@@ -116,6 +116,19 @@ export const en: MessageDict = {
   'toolbar.search': 'Search chat history',
   'toolbar.stop': 'Stop generating',
 
+  // Attachments
+  'attach.remove': 'Remove',
+  'attach.unsupported': 'Unsupported file type',
+  'attach.tooLarge': 'File too large (over 10MB)',
+
+  // Search chat history
+  'search.title': 'Search chat history',
+  'search.placeholder': 'Search message content...',
+  'search.empty': 'No messages yet',
+  'search.noMatch': 'No matching messages',
+  'search.locate': 'Locate',
+  'search.count': '{count} results',
+
   // Context menu
   'menu.test': 'Test menu item',
   'menu.disabled': 'Disabled',
@@ -142,6 +155,11 @@ export const en: MessageDict = {
   'conv.menu.renameGroup': 'Edit Group',
   'conv.menu.renameBot': 'Edit Friend',
   'conv.menu.clearHistory': 'Clear History',
+  'conv.menu.deleteSession': 'Delete Conversation',
+  'conv.deleteSession.title': 'Delete conversation',
+  'conv.deleteSession.message': 'This will clear all messages with "{name}" and remove it from the list. This cannot be undone.',
+  'conv.deleteSession.confirm': 'Delete',
+  'conv.deleteSession.done': 'Conversation deleted',
   'conv.menu.deleteGroup': 'Delete Group',
   'conv.menu.deleteBot': 'Delete Friend',
   'conv.menu.comingSoon': 'Coming soon',
