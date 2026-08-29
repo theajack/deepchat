@@ -73,11 +73,33 @@ export function toCreatedMessage(row: ChatMessageRow, target: BridgeTarget): Rec
  * Per-session prompt sequence: a user prompt can span several dsh turns
  * (tool-call loops); every stream frame of one run shares the draft id
  * `m-p{N}` so the whole reply lands in ONE chat bubble (legacy semantics).
+ *
+ * The sequence is derived from the durable session log on every call — a
+ * module-level counter would desync after host restart / plugin reload /
+ * lazy agent restore (the log already holds N prompts while the counter
+ * starts at 0), colliding `m-p1` with a historical row id: the final
+ * `message.created` would be deduped by the front end and the bubble vanish.
  */
-const promptSeqBySession = new Map<string, number>()
+const promptCountCache = new WeakMap<Session, { length: number; count: number }>()
 
-function promptSeqOf(sessionId: string): number {
-  return promptSeqBySession.get(sessionId) ?? 0
+/** Number of visible user prompts recorded in the session log so far. */
+function promptSeqOf(session: Session): number {
+  const cached = promptCountCache.get(session)
+  let start = 0
+  let count = 0
+  if (cached !== undefined && cached.length <= session.events.length) {
+    start = cached.length
+    count = cached.count
+  }
+  for (let i = start; i < session.events.length; i++) {
+    const event = session.events[i]
+    if (event === undefined) continue
+    if (event.type === 'user/message' && (event.data.source as { kind?: string } | undefined)?.kind === 'user') {
+      count += 1
+    }
+  }
+  promptCountCache.set(session, { length: session.events.length, count })
+  return count
 }
 
 /**
@@ -88,10 +110,7 @@ function promptSeqOf(sessionId: string): number {
 export function translateSessionEvent(session: Session, event: SessionEvent, target: BridgeTarget, broadcast: Broadcast): void {
   switch (event.type) {
     case 'user/message': {
-      // New visible prompt → bump the run counter; its stream frames reuse it.
-      if ((event.data.source as { kind?: string } | undefined)?.kind === 'user') {
-        promptSeqBySession.set(session.id, promptSeqOf(session.id) + 1)
-      }
+      // Sequence is derived from the log (see promptSeqOf) — nothing to bump.
       return
     }
     case 'turn/start': {
@@ -128,7 +147,7 @@ export function translateSessionEvent(session: Session, event: SessionEvent, tar
       // the turn); aggregate the prompt run and close the draft. The row id
       // `m-p{N}` MUST match the streaming draft id so the front end can
       // replace the draft with the final message in place.
-      const row = aggregatePrompt(session, promptSeqOf(session.id), target.botId, target.botName)
+      const row = aggregatePrompt(session, promptSeqOf(session), target.botId, target.botName)
       broadcast('message.stream', {
         messageId: row.id,
         conversationId: target.conversationId,
@@ -151,7 +170,7 @@ export function translateSessionEvent(session: Session, event: SessionEvent, tar
     }
     case 'assistant/chunk': {
       const chunk = event.data.chunk
-      const draftId = `m-p${String(promptSeqOf(session.id))}`
+      const draftId = `m-p${String(promptSeqOf(session))}`
       if (chunk.type === 'text-delta' || chunk.type === 'reasoning-delta') {
         broadcast('message.stream', {
           messageId: draftId,
@@ -177,7 +196,7 @@ export function translateSessionEvent(session: Session, event: SessionEvent, tar
     }
     case 'tool/call': {
       broadcast('agent.tool.start', {
-        draftId: `m-p${String(promptSeqOf(session.id))}`,
+        draftId: `m-p${String(promptSeqOf(session))}`,
         conversationId: target.conversationId,
         botId: target.botId,
         id: event.data.callId,
@@ -189,7 +208,7 @@ export function translateSessionEvent(session: Session, event: SessionEvent, tar
     case 'tool/result': {
       const block = event.data.message.content[0]
       broadcast('agent.tool.end', {
-        draftId: `m-p${String(promptSeqOf(session.id))}`,
+        draftId: `m-p${String(promptSeqOf(session))}`,
         id: block?.toolCallId ?? '',
         result: { content: block?.content ?? [], isError: block?.isError },
         status: 'success',

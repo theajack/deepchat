@@ -256,6 +256,17 @@ export const useMessagesStore = defineStore('messages', () => {
             }
           } else {
             const prev = streams.value[f.messageId]
+            // 草稿重建（agent loop 后续 turn 的流式帧）：移除已落定的同 id
+            // 旧消息，让草稿接管渲染，避免重复气泡与 created 去重吞消息
+            if (!prev) {
+              const list = byConv.value[f.conversationId] ?? []
+              if (list.some(m => m.id === f.messageId)) {
+                byConv.value = {
+                  ...byConv.value,
+                  [f.conversationId]: list.filter(m => m.id !== f.messageId),
+                }
+              }
+            }
             const segType: StreamSegment['type'] = f.reasoning ? 'reasoning' : 'text'
             const prevSegs = prev?.segments ?? []
             const lastSeg = prevSegs.length > 0 ? prevSegs[prevSegs.length - 1] : null
