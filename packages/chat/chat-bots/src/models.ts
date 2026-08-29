@@ -205,3 +205,51 @@ interface ModelsDomainView {
     delete(key: string): Promise<unknown>
   }
 }
+
+/** Storage key holding the user's default-model choice. */
+export const DEFAULT_MODEL_KEY = 'default_model_id'
+
+/** Structural view of the shared `meta` key/value table. */
+interface MetaDomainView {
+  table(name: 'meta'): {
+    get(key: string): string | undefined
+    put(key: string, value: string): Promise<unknown>
+    delete(key: string): Promise<unknown>
+  }
+}
+
+/**
+ * The user's default-model choice, kept beside the records in the shared
+ * `meta` table. Separate from {@link ModelStore} so each holder sees exactly
+ * the one table it needs.
+ */
+export class DefaultModelStore {
+  constructor(
+    private readonly domain: MetaDomainView,
+    private readonly models: ModelStore,
+  ) {}
+
+  /** The chosen model id, or undefined when never set. */
+  id(): string | undefined {
+    return this.domain.table('meta').get(DEFAULT_MODEL_KEY)
+  }
+
+  async set(modelId: string): Promise<void> {
+    await this.domain.table('meta').put(DEFAULT_MODEL_KEY, modelId)
+  }
+
+  async clear(): Promise<void> {
+    await this.domain.table('meta').delete(DEFAULT_MODEL_KEY)
+  }
+
+  /**
+   * The model to use for background work (memory consolidation): the explicit
+   * default when it still exists, otherwise the newest record — i.e. "whatever
+   * the user configured", falling back to "the first model available".
+   */
+  resolve(): ModelRecord | undefined {
+    const id = this.id()
+    const explicit = id === undefined ? undefined : this.models.get(id)
+    return explicit ?? this.models.list()[0]
+  }
+}

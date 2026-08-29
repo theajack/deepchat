@@ -14,6 +14,9 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { Context } from '@deepseek-ai/cordis'
 import { Service } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
+// `domainTable` validates with zod (same as models.ts / schema.ts); the
+// schemastery default import above is the plugin-config dialect.
+import { z as zod } from 'zod'
 import type { Agent, AgentHandle } from '@deepseek-ai/dsh-agent'
 import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
@@ -29,11 +32,22 @@ import type {} from '@deepseek-ai/dsh-tools'
 // Side-effect type import: pulls in the `settings`/`credentials` augmentations.
 import type {} from '@deepseek-ai/dsh-settings'
 import type {} from '@deepseek-ai/dsh-credentials'
-import { type ModelRecord, mirrorDeepSeekCredential, modelRecordSchema, ModelStore, removeRoute, routeIdFor, syncRoute } from './models.ts'
+import { DefaultModelStore, type ModelRecord, mirrorDeepSeekCredential, modelRecordSchema, ModelStore, removeRoute, routeIdFor, syncRoute } from './models.ts'
 import { formatInstalls, installGithubSkill, searchSkillsApi } from './skills-remote.ts'
 import { buildBotAgentSetup, resolveEnabledSkills } from './agent-setup.ts'
 import { LlmTraceRecorder } from './llm-trace.ts'
 import { writeBotAvatar } from './avatar.ts'
+import {
+  consolidateMemory,
+  extractTranscript,
+  memoryUpdatedAt,
+  readMemory,
+  writeMemory,
+  type MemorySourceRow,
+} from './memory.ts'
+
+export { extractTranscript, memoryUpdatedAt, readMemory, writeMemory } from './memory.ts'
+export type { MemorySourceRow } from './memory.ts'
 import { configureDebugLog, debugLog, isDebugLogEnabled, tailDebugLog, DEBUG_LOG_PATH } from './debug-log.ts'
 import { pageRows, renderPrivateHistory, translateSessionEvent } from './bridge.ts'
 import { defineDomain, domainTable } from '@deepseek-ai/dsh-storage-domain'
@@ -48,8 +62,16 @@ export type { EnabledSkillSummary } from './agent-setup.ts'
 /** Cordis plugin name. */
 export const name = 'chat-bots'
 
-/** Agent/skill/tool registries, settings, credentials, storage domain, attachments, and HTTP are required. */
-export const inject = ['agents', 'tools', 'skills', 'storageDomain', 'webServer', 'attachments']
+/**
+ * Agent/skill/tool registries, the LLM seam (memory consolidation calls it
+ * directly), the settings/credentials resolvers, storage domain, attachments,
+ * and HTTP are required.
+ *
+ * `settings`/`credentials` are intentionally absent: declaring them deadlocks
+ * the boot order (they activate after the chat plugins), so they are requested
+ * dynamically via `ctx.inject` in the constructor instead.
+ */
+export const inject = ['agents', 'llm', 'tools', 'skills', 'storageDomain', 'webServer', 'attachments']
 
 /** Plugin config (all deployment-tunable values carry defaults). */
 export interface Config {
@@ -127,6 +149,8 @@ const botsDomainSpec = defineDomain({
     // survive a second `storageDomain.open` from one plugin, so all chat-bots
     // tables share a single domain handle.
     models: domainTable<string, ModelRecord>(modelRecordSchema),
+    // Free-form key/value settings (e.g. the user's default model choice).
+    meta: domainTable<string, string>(zod.string()),
   },
 })
 
@@ -142,6 +166,9 @@ export class ChatBots extends Service {
 
   private models: ModelStore | undefined
 
+  /** The user's default-model choice, backing background work (memory). */
+  private defaultModel: DefaultModelStore | undefined
+
   /** Live agent handles by bot id; disposal removes the entry. */
   private readonly handles = new Map<string, AgentHandle>()
   /** 本地图片头像目录（与 workspace/agents 同级，按 id 命名） */
@@ -149,6 +176,16 @@ export class ChatBots extends Service {
 
   /** Persona-section disposers by bot id, for live persona edits. */
   private readonly personaDispose = new Map<string, () => void>()
+
+  /** Memory-section disposers by bot id, for live memory refreshes. */
+  private readonly memoryDispose = new Map<string, () => void>()
+
+  /**
+   * In-flight memory consolidation per bot. Chains new work onto the previous
+   * promise so two clears of the same bot never write the file concurrently
+   * (different bots still run in parallel).
+   */
+  private readonly pendingMemory = new Map<string, Promise<void>>()
 
   /** LLM call trace recorder backing the debug「对话信息」window. */
   private trace: LlmTraceRecorder | undefined
@@ -180,6 +217,7 @@ export class ChatBots extends Service {
       this.domain = undefined
     }, 'chat-bots domain')
     this.models = new ModelStore(this.domain)
+    this.defaultModel = new DefaultModelStore(this.domain, this.models)
     // 一次性回填：为缺少工作目录的旧好友记录补建 workspace/agents/{id}
     const bots = this.domain.table('bots')
     for (const [id, bot] of bots.entries()) {
@@ -390,6 +428,10 @@ export class ChatBots extends Service {
   async clear(id: string): Promise<void> {
     const bot = this.get(id)
     if (bot === undefined) throw new Error(`chat-bots: bot "${id}" not found`)
+    // 先快照对话原料：session 日志马上要删除，而快照出来的 rows 只是普通数组，
+    // 后续沉淀完全脱离清理链路（不 await，不阻塞清空）。
+    const rows = await this.snapshotBotMemory(bot)
+    if (rows !== undefined) this.consolidateBotMemory(bot, rows)
     const handle = this.handles.get(id)
     if (handle !== undefined) {
       this.handles.delete(id)
@@ -434,9 +476,11 @@ export class ChatBots extends Service {
     // Enabled-skill summaries are resolved up front: the setup callback must
     // stay synchronous, so the async registry lookup happens before creation.
     const skillSummaries = await resolveEnabledSkills(this.ctx, bot)
+    // 长期记忆：存在 workspace 下，清空对话不会丢失
+    const memory = await readMemory(bot.workspaceDir)
     // Shared capability wiring: persona section, agent-disable triple guard,
     // tool whitelist, and the enabled-skill catalog + `skill` loader tool.
-    const setup = buildBotAgentSetup(this.ctx, bot, skillSummaries)
+    const setup = buildBotAgentSetup(this.ctx, bot, skillSummaries, memory)
     // A persisted session (restart) resumes with its durable memory intact;
     // a fresh bot has none yet, so the resume falls back to creation.
     let handle: AgentHandle
@@ -452,6 +496,7 @@ export class ChatBots extends Service {
       // The owner fiber's disposal tears the handle down; only forget it here.
       if (this.handles.get(id) === handle) this.handles.delete(id)
       this.personaDispose.delete(id)
+      this.memoryDispose.delete(id)
     }, `chat-bots agent ${id}`)
     return handle.agent
   }
@@ -466,6 +511,85 @@ export class ChatBots extends Service {
     })
     this.personaDispose.set(bot.id, dispose)
   }
+
+  /** Swap the memory section of a live agent in place (after consolidation). */
+  private async applyMemory(agent: Agent, bot: BotRecord): Promise<void> {
+    this.memoryDispose.get(bot.id)?.()
+    const memory = (await readMemory(bot.workspaceDir)).trim()
+    if (memory === '') {
+      this.memoryDispose.delete(bot.id)
+      return
+    }
+    this.memoryDispose.set(bot.id, agent.ctx.systemPrompt.section({
+      name: 'chat:memory',
+      order: 1,
+      text: `【长期记忆】以下是你与这位用户长期相处沉淀下来的记忆，跨会话持续有效（清空对话不会丢失）。请自然地运用它，但不要生硬地复述或主动提及"我的记忆里写着"。\n\n${memory}`,
+    }))
+  }
+
+  /**
+   * Refresh the live agent's memory section once a consolidation lands, so the
+   * next reply already reflects the new document. No live agent (the common
+   * case right after `clear()`) is fine: `ensureAgent` reads the file later.
+   */
+  private async refreshMemorySection(id: string): Promise<void> {
+    const handle = this.handles.get(id)
+    const bot = this.get(id)
+    if (handle === undefined || bot === undefined) return
+    await this.applyMemory(handle.agent, bot)
+  }
+
+  /**
+   * Distill a conversation into the bot's long-term memory, fire-and-forget.
+   *
+   * Never awaited by the caller: the rows are already an in-memory snapshot, so
+   * clearing the session right after enqueuing loses nothing.
+   */
+  consolidateBotMemory(bot: BotRecord, rows: readonly MemorySourceRow[]): void {
+    if (rows.length === 0) return
+    const previous = this.pendingMemory.get(bot.id) ?? Promise.resolve()
+    const next = previous.then(async () => {
+      const model = this.defaultModel?.resolve()
+      if (model === undefined) return
+      try {
+        const written = await consolidateMemory({
+          ctx: this.ctx,
+          botName: bot.name,
+          workspaceDir: bot.workspaceDir,
+          rows,
+          provider: routeIdFor(model.id),
+          model: model.modelName,
+        })
+        if (written) await this.refreshMemorySection(bot.id)
+      } catch (error: unknown) {
+        // Failures never surface to the UI: clearing a chat must always succeed.
+        this.ctx.logger.warn('chat-bots: memory consolidation failed for "%s": %o', bot.id, error)
+      }
+    })
+    this.pendingMemory.set(bot.id, next)
+    void next.finally(() => {
+      if (this.pendingMemory.get(bot.id) === next) this.pendingMemory.delete(bot.id)
+    })
+  }
+
+  /**
+   * Snapshot one bot's conversation so it can outlive its session.
+   * Returns undefined when there is nothing worth distilling.
+   */
+  async snapshotBotMemory(bot: BotRecord): Promise<readonly MemorySourceRow[] | undefined> {
+    // 无可用模型时不必付出 ensureAgent 的成本
+    if (this.defaultModel?.resolve() === undefined) return undefined
+    try {
+      const agent = await this.ensureAgent(bot.id)
+      const rows = extractTranscript(agent.session)
+      return rows.length === 0 ? undefined : rows
+    } catch (error: unknown) {
+      this.ctx.logger.warn('chat-bots: memory snapshot failed for "%s": %o', bot.id, error)
+      return undefined
+    }
+  }
+
+
 
   /** Rebuild the live agent for a bot on its existing durable session. */
   private async rebuildAgent(id: string): Promise<void> {
@@ -683,9 +807,30 @@ export class ChatBots extends Service {
         try {
           const models = this.models
           if (models === undefined) return json(res, 503, { error: 'model store not ready' })
-          const match = /^\/chatapi\/models(?:\/([^/]+))?$/.exec(req.url ?? '')
+          const match = /^\/chatapi\/models(?:\/([^/]+))?(?=\?|$)/.exec((req.url ?? '').split('?')[0] ?? '')
           if (match === null) return json(res, 404, { error: 'not found' })
           const modelId = match[1]
+
+          // 默认模型（后台任务如记忆沉淀用它）。model id 恒为 `model-<uuid>`，
+          // 永不等于 "default"，故与 /:id 路由无冲突。
+          if (modelId === 'default') {
+            const defaults = this.defaultModel
+            if (defaults === undefined) return json(res, 503, { error: 'default model store not ready' })
+            if (req.method === 'GET') {
+              return json(res, 200, { id: defaults.id() ?? null })
+            }
+            if (req.method === 'POST') {
+              const body = await readBody(req)
+              const id = typeof body.id === 'string' ? body.id.trim() : ''
+              if (id !== '' && models.get(id) === undefined) {
+                return json(res, 404, { error: `model "${id}" not found` })
+              }
+              if (id === '') await defaults.clear()
+              else await defaults.set(id)
+              return json(res, 200, { id: defaults.id() ?? null })
+            }
+            return json(res, 405, { error: 'method not allowed' })
+          }
 
           // GET /chatapi/models — 列表（含 route_id 供 bot 绑定）
           if (modelId === undefined && req.method === 'GET') {
@@ -999,6 +1144,27 @@ export class ChatBots extends Service {
             // 通知前端清除该会话的全部本地状态（含流式残留）
             this.broadcast('message.cleared', { conversationId: `private:${botId}` })
             return json(res, 200, { cleared: true })
+          }
+
+          // 长期记忆：跨会话持久，清空对话不会丢失
+          if (action === '/memory') {
+            const bot = this.get(botId)
+            if (bot === undefined) return json(res, 404, { error: 'bot not found' })
+            if (req.method === 'GET') {
+              return json(res, 200, {
+                text: await readMemory(bot.workspaceDir),
+                updatedAt: await memoryUpdatedAt(bot.workspaceDir) ?? null,
+              })
+            }
+            if (req.method === 'PUT') {
+              const body = await readBody(req)
+              const text = typeof body.text === 'string' ? body.text : ''
+              await writeMemory(bot.workspaceDir, text)
+              const handle = this.handles.get(botId)
+              if (handle !== undefined) await this.applyMemory(handle.agent, bot)
+              return json(res, 200, { updatedAt: await memoryUpdatedAt(bot.workspaceDir) ?? null })
+            }
+            return json(res, 405, { error: 'method not allowed' })
           }
 
           if (action === '/send') {

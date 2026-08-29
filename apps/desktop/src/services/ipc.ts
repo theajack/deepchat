@@ -209,12 +209,42 @@ const NOT_MIGRATED = '该功能尚未迁移到 dsh 底座'
 export class DshTransport implements IpcTransport {
   requestTimeoutMs = 30000
 
+  /** Guards the one-shot default-model migration below. */
+  private defaultModelMigrated = false
+
   /** 本地设置桥（M1：暂存 localStorage，后续迁至 dsh settings/credentials） */
   private localSettings(): Record<string, string> {
     try {
       return JSON.parse(localStorage.getItem('chat-agent:settings') ?? '{}') as Record<string, string>
     } catch {
       return {}
+    }
+  }
+
+  /**
+   * One-shot migration: the default model used to live only in localStorage,
+   * which the host cannot read. Push it once so background work (memory
+   * consolidation) resolves the same model the UI shows.
+   */
+  private async migrateDefaultModel(): Promise<void> {
+    if (this.defaultModelMigrated) return
+    this.defaultModelMigrated = true
+    const local = this.localSettings()['default_model_id']
+    if (local === undefined || local === '') return
+    try {
+      const current = await dshGet<{ id: string | null }>('/chatapi/models/default')
+      if (current.id === null) await dshSend('POST', '/chatapi/models/default', { id: local })
+    } catch {
+      // 静默：仅后台任务失去偏好，UI 行为不受影响
+    }
+  }
+
+  /** Push the default-model choice to the host; fire-and-forget, never blocks the UI. */
+  private async syncDefaultModel(id: string): Promise<void> {
+    try {
+      await dshSend('POST', '/chatapi/models/default', { id })
+    } catch {
+      // 后端不可用时静默：默认模型本身已存本地，仅后台任务失去偏好
     }
   }
 
@@ -447,6 +477,7 @@ export class DshTransport implements IpcTransport {
     // ── model：/chatapi/models（storage 记录 + llm-pi-ai 路由同步）──
     if (method === 'model.list') {
       const { items } = await dshGet<{ items: Array<Record<string, unknown>> }>('/chatapi/models')
+      void this.migrateDefaultModel()
       return items as T
     }
     if (method === 'model.create') {
@@ -474,8 +505,17 @@ export class DshTransport implements IpcTransport {
       return undefined as T
     }
     if (method === 'model.setDefault') {
-      this.setLocalSetting('default_model_id', String(params.id ?? ''))
+      const id = String(params.id ?? '')
+      this.setLocalSetting('default_model_id', id)
+      // 同步到宿主：记忆沉淀等后台任务在后端解析默认模型，读不到 localStorage
+      void this.syncDefaultModel(id)
       return undefined as T
+    }
+    if (method === 'bot.getMemory') {
+      return await dshGet<T>(`/chatapi/bots/${encodeURIComponent(String(params.id))}/memory`)
+    }
+    if (method === 'bot.setMemory') {
+      return await dshSend<T>('PUT', `/chatapi/bots/${encodeURIComponent(String(params.id))}/memory`, { text: String(params.text ?? '') })
     }
 
     // ── 工具：dsh 全局工具注册表投影 ──

@@ -171,20 +171,24 @@ function registerFetchTool(agentCtx: Context): void {
  * straight to `ctx.agents.create/resume({ setup })`; it applies:
  *
  * 1. the persona prompt section;
- * 2. the agent-disable triple guard when `agentEnabled` is off (no tool
+ * 2. the long-term memory document (survives conversation clearing);
+ * 3. the agent-disable triple guard when `agentEnabled` is off (no tool
  *    schemas, an explicit no-tools prompt, and a denying execution guard);
- * 3. the per-bot tool whitelist as a scoped `tools.restrict` (whitelisted-out
+ * 4. the per-bot tool whitelist as a scoped `tools.restrict` (whitelisted-out
  *    tools disappear from the model-visible surface entirely);
- * 4. the enabled-skill catalog prompt section plus a scoped `skill` loader
+ * 5. the enabled-skill catalog prompt section plus a scoped `skill` loader
  *    tool, mirroring the legacy chat-agent skill mechanism.
  */
 export function buildBotAgentSetup(
   ctx: Context,
   bot: BotRecord,
   skillSummaries: readonly EnabledSkillSummary[],
+  /** Long-term memory document; empty string registers no section. */
+  memory = '',
 ): (agentCtx: Context) => void {
   const enabledTools = bot.enabledTools ?? []
   const allowedSkills = new Set(skillSummaries.map(skill => skill.name))
+  const memoryText = memory.trim()
 
   return (agentCtx: Context): void => {
     agentCtx.systemPrompt.section({
@@ -192,6 +196,16 @@ export function buildBotAgentSetup(
       order: 0,
       text: bot.persona,
     })
+
+    // 记忆段必须在 agentEnabled 的 early return 之前注册：
+    // 未开启 Agent 能力的纯聊天好友同样需要长期记忆。
+    if (memoryText !== '') {
+      agentCtx.systemPrompt.section({
+        name: 'chat:memory',
+        order: 1,
+        text: `【长期记忆】以下是你与这位用户长期相处沉淀下来的记忆，跨会话持续有效（清空对话不会丢失）。请自然地运用它，但不要生硬地复述或主动提及"我的记忆里写着"。\n\n${memoryText}`,
+      })
+    }
 
     const agentEnabled = bot.agentEnabled ?? bot.workspaceDir !== undefined
     if (!agentEnabled) {

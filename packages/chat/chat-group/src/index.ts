@@ -38,6 +38,7 @@ import { shouldRespond } from './trigger.ts'
 import type { TriggerMessage } from './trigger.ts'
 import type { GroupCreateInput, GroupMessageView, GroupRecord, GroupUpdatePatch } from './types.ts'
 import { aggregateLastRun, pageRows, translateSessionEvent } from '@deepseek-ai/dsh-chat-bots/bridge'
+import { extractTranscript, type MemorySourceRow } from '@deepseek-ai/dsh-chat-bots'
 
 export type {
   GroupCreateInput,
@@ -114,6 +115,9 @@ export class ChatGroup extends Service {
   async clear(id: string): Promise<void> {
     const group = this.get(id)
     if (group === undefined) throw new Error(`chat-group: group "${id}" not found`)
+    // 清空前为每个成员 bot 快照群聊对话并异步沉淀进长期记忆（不阻塞清空）。
+    // 快照必须在删除会话日志之前完成——rows 是普通数组，之后就与会话无关了。
+    await this.snapshotMemberMemories(id)
     // 释放容器与所有 bot 群会话 agent
     const container = this.containers.get(id)
     if (container !== undefined) {
@@ -137,6 +141,43 @@ export class ChatGroup extends Service {
     const sessionId = `session-${randomUUID()}` as SessionId
     await this.store.table('groups').put(id, { ...group, sessionId, updatedAt: Date.now() })
     await this.removeSessionLogs(group.sessionId)
+  }
+
+  /**
+   * Snapshot every member bot's group conversation and hand it to chat-bots for
+   * long-term memory consolidation (fire-and-forget).
+   *
+   * Group transcripts live in per-(group, bot) sessions that are about to be
+   * deleted, so the rows must be lifted into memory first. Each bot gets one
+   * shared memory document: experiences from every group merge into the same
+   * file as its private chats.
+   */
+  private async snapshotMemberMemories(groupId: string): Promise<void> {
+    const table = this.store.table('bot_sessions')
+    const keys = [...table.entries()].map(([key]) => key).filter(key => key.startsWith(`${groupId}:`))
+    for (const key of keys) {
+      const separator = key.indexOf(':')
+      if (separator <= 0) continue
+      const botId = key.slice(separator + 1)
+      const bot = this.ctx.chatBots.get(botId)
+      if (bot === undefined) continue
+      // Prefer the live agent so we do not pay for a resume.
+      const cached = this.botAgents.get(key)
+      let rows: readonly MemorySourceRow[] | undefined
+      if (cached !== undefined) {
+        rows = extractTranscript(cached.handle.agent.session)
+      } else {
+        const binding = table.get(key)
+        if (binding === undefined) continue
+        const handle = await this.tryResume(binding.sessionId)
+        try {
+          rows = extractTranscript(handle.agent.session)
+        } finally {
+          await handle.dispose()
+        }
+      }
+      if (rows !== undefined && rows.length > 0) this.ctx.chatBots.consolidateBotMemory(bot, rows)
+    }
   }
 
   /** Remove one session's log directories under $DSH_HOME/sessions. */

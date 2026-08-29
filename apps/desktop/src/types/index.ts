@@ -151,6 +151,13 @@ export interface ModelConfig {
   updated_at: number
 }
 
+/** 一个好友的长期记忆文档（跨会话持久，清空对话不丢失） */
+export interface BotMemory {
+  text: string
+  /** 上次沉淀时间（epoch ms）；null 表示尚无记忆 */
+  updatedAt: number | null
+}
+
 export interface ModelInput {
   name: string
   provider?: string

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, reactive, ref, watch } from "vue";
-import { BookOpen, Server, Sparkles, Wrench, UserPlus, Users } from "lucide-vue-next";
+import { BookOpen, Brain, Loader2, Save, Server, Sparkles, Wrench, UserPlus, Users } from "lucide-vue-next";
 import Modal from "../components/common/Modal.vue";
 import ModelEditorModal from "../components/settings/ModelEditorModal.vue";
 import GroupForm from "../components/contacts/GroupForm.vue";
@@ -17,7 +17,7 @@ import { useBotsStore } from "../stores/bots";
 import { useConversationsStore } from "../stores/conversations";
 import { useModelsStore } from "../stores/models";
 import { useSettingsStore } from "../stores/settings";
-import type { ModelConfig } from "../types";
+import type { BotMemory, ModelConfig } from "../types";
 import { t } from "../i18n";
 
 const app = useAppStore();
@@ -98,7 +98,11 @@ watch(
       form.enabled_skills = [];
       form.enabled_mcp_servers = [];
     }
+    memory.value = null;
+    memoryDraft.value = "";
+    memoryLoading.value = false;
     await ensureModels();
+    if (!isNew.value) void loadMemory();
     // 新建时默认选中模型列表中的默认模型
     if (isNew.value && !form.model_id) {
       const defaultId = settings.values["default_model_id"];
@@ -109,6 +113,47 @@ watch(
   },
   { immediate: true },
 );
+
+// ── 长期记忆：跨会话持久，清空对话不丢失 ──────────────────────────────────
+const memory = ref<BotMemory | null>(null);
+const memoryDraft = ref("");
+const memoryLoading = ref(false);
+const memorySaving = ref(false);
+
+async function loadMemory() {
+  const target = app.editingBot;
+  if (!target || target === "new") return;
+  memoryLoading.value = true;
+  try {
+    const loaded = await chatApi.getBotMemory(target.id);
+    memory.value = loaded;
+    memoryDraft.value = loaded.text;
+  } catch (e) {
+    app.toast(e instanceof Error ? e.message : String(e));
+  } finally {
+    memoryLoading.value = false;
+  }
+}
+
+async function saveMemory() {
+  const target = app.editingBot;
+  if (!target || target === "new" || memorySaving.value) return;
+  memorySaving.value = true;
+  try {
+    const saved = await chatApi.setBotMemory(target.id, memoryDraft.value);
+    memory.value = saved;
+    memoryDraft.value = saved.text;
+  } catch (e) {
+    app.toast(e instanceof Error ? e.message : String(e));
+  } finally {
+    memorySaving.value = false;
+  }
+}
+
+function formatMemoryTime(ms: number | null): string {
+  if (ms === null) return t("bot.memoryNever");
+  return new Date(ms).toLocaleString();
+}
 
 async function onGroupCreated(convId: string) {
   app.closeBotEditor();
@@ -254,6 +299,38 @@ async function save() {
           :disabled="generating"
           class="w-full resize-none rounded-lg border border-line bg-ink-2/70 px-3 py-2 text-[13px] text-hi outline-none transition-all placeholder:text-lo focus:border-accent/45 focus:shadow-[0_0_0_3px_var(--color-accent-soft)] disabled:opacity-50" />
       </div>
+
+      <!-- 长期记忆：清空对话时自动沉淀，不会随聊天记录丢失 -->
+      <div v-if="!isNew">
+        <div class="mb-1.5 flex items-center justify-between">
+          <label class="flex items-center gap-1.5 text-xs text-mid">
+            <Brain :size="12" class="text-accent" />
+            {{ t("bot.memory") }}
+          </label>
+          <button
+            type="button"
+            class="flex items-center gap-1.5 rounded-md border border-line-strong/50 bg-ink-2/70 px-2.5 py-1 text-[11px] text-mid transition-all hover:border-accent/40 hover:bg-ink-3 hover:text-accent disabled:cursor-not-allowed disabled:opacity-50"
+            :disabled="memoryLoading || memorySaving"
+            @click="saveMemory"
+          >
+            <Loader2 v-if="memorySaving" :size="12" class="animate-spin" />
+            <Save v-else :size="12" />
+            {{ memorySaving ? t("common.saving") : t("bot.saveMemory") }}
+          </button>
+        </div>
+        <div v-if="memoryLoading" class="flex items-center justify-center gap-2 py-6 text-[11px] text-lo">
+          <Loader2 :size="13" class="animate-spin text-accent" /> {{ t("common.loading") }}
+        </div>
+        <template v-else>
+          <textarea v-model="memoryDraft" rows="7" :placeholder="t('bot.memoryPlaceholder')"
+            class="w-full resize-none rounded-lg border border-line bg-ink-2/70 px-3 py-2 font-mono text-[12px] leading-relaxed text-hi outline-none transition-all placeholder:text-lo focus:border-accent/45 focus:shadow-[0_0_0_3px_var(--color-accent-soft)]" />
+          <p class="mt-1.5 text-[11px] leading-relaxed text-lo">
+            {{ t("bot.memoryHint") }}
+            <span class="text-mid">{{ t("bot.memoryUpdatedAt", { time: formatMemoryTime(memory?.updatedAt ?? null) }) }}</span>
+          </p>
+        </template>
+      </div>
+
       <div>
         <label class="mb-1.5 block text-xs text-mid">{{ t("bot.skills") }}</label>
         <input v-model="form.skills" type="text" :placeholder="t('bot.skillsPlaceholder')"

@@ -1,4 +1,4 @@
-import type { Bot, BotInput, Conversation, Message, MessageAttachment, ModelConfig, ModelInput, UpdateConversationInput } from '../types'
+import type { Bot, BotInput, BotMemory, Conversation, Message, MessageAttachment, ModelConfig, ModelInput, UpdateConversationInput } from '../types'
 import { transport, type IpcTransport } from './ipc'
 
 /** 一页历史消息 + 是否还有更早的记录 */
@@ -38,6 +38,15 @@ export class ChatApi {
   }
   setDefaultModel(id: string | null): Promise<void> {
     return this.t.request('model.setDefault', { id })
+  }
+
+  /** Read one bot's long-term memory document (survives clearing the chat). */
+  getBotMemory(id: string): Promise<BotMemory> {
+    return this.t.request('bot.getMemory', { id })
+  }
+  /** Overwrite one bot's long-term memory document. */
+  setBotMemory(id: string, text: string): Promise<BotMemory> {
+    return this.t.request('bot.setMemory', { id, text })
   }
 
   listConversations(): Promise<Conversation[]> {
