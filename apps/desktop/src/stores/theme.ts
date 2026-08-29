@@ -3,7 +3,7 @@ import { computed, ref } from 'vue'
 
 export type ThemeMode = 'light' | 'dark' | 'system'
 
-const STORAGE_KEY = 'chat-agent:theme'
+const STORAGE_KEY = 'deepchat:theme'
 
 function systemPrefersDark(): boolean {
   return typeof window !== 'undefined' && window.matchMedia?.('(prefers-color-scheme: dark)').matches

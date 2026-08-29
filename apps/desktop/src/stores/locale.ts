@@ -4,7 +4,7 @@ import { en } from '../i18n/en'
 import { zh } from '../i18n/zh'
 import type { EffectiveLocale, Locale } from '../i18n/types'
 
-const STORAGE_KEY = 'chat-agent:locale'
+const STORAGE_KEY = 'deepchat:locale'
 
 function systemLocale(): EffectiveLocale {
   if (typeof navigator === 'undefined') return 'en'

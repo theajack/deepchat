@@ -4,7 +4,7 @@ import type { Bot, Conversation } from '../types'
 
 export type ViewName = 'chat' | 'contacts' | 'settings'
 
-const SETTINGS_SECTION_KEY = 'chat-agent:settings-section'
+const SETTINGS_SECTION_KEY = 'deepchat:settings-section'
 
 /** 应用级 UI 状态：视图导航、弹窗、Toast */
 export const useAppStore = defineStore('app', () => {

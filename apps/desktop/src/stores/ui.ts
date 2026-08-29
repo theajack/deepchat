@@ -1,7 +1,7 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
 
-const STORAGE_KEY = 'chat-agent:sidebar-width'
+const STORAGE_KEY = 'deepchat:sidebar-width'
 
 /** 侧边栏（会话/好友/设置列表）共享宽度 */
 export const SIDEBAR_MIN_WIDTH = 180

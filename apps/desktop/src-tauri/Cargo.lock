@@ -3,7 +3,7 @@
 version = 4
 
 [[package]]
-name = "ChatAgent"
+name = "DeepChat"
 version = "0.1.0"
 dependencies = [
  "objc2",

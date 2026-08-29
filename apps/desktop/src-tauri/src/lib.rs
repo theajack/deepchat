@@ -71,12 +71,12 @@ fn resolve_repo_root() -> Option<PathBuf> {
 }
 
 /// 解析 dsh 启动方式：
-/// 1. CHAT_AGENT_DSH_CMD 环境变量（完整命令，如 "node /path/bin.js"）
+/// 1. DEEPCHAT_DSH_CMD 环境变量（完整命令，如 "node /path/bin.js"）
 /// 2. 打包后：app bundle 内嵌的 dsh（TODO：随产物分发）
 /// 3. dev 兜底：仓库根目录 node apps/cli/lib/bin.js --profile chat-agent
 fn resolve_dsh_command() -> Option<(String, Vec<String>, PathBuf)> {
     // 1. 显式环境变量（空格分隔完整命令）
-    if let Ok(cmd) = std::env::var("CHAT_AGENT_DSH_CMD") {
+    if let Ok(cmd) = std::env::var("DEEPCHAT_DSH_CMD") {
         let mut parts = cmd.split_whitespace().map(String::from);
         let program = parts.next()?;
         let args: Vec<String> = parts.chain(["--profile".into(), "chat-agent".into()]).collect();
@@ -325,11 +325,11 @@ pub fn run() {
                     app.manage(DshState {
                         child: Mutex::new(Some(child)),
                     });
-                    eprintln!("[ChatAgent] dsh 宿主进程已启动（--profile chat-agent）");
+                    eprintln!("[DeepChat] dsh 宿主进程已启动（--profile chat-agent）");
                 }
                 Err(e) => {
                     eprintln!(
-                        "[ChatAgent] dsh 宿主进程启动失败（应用将继续运行但无后端功能）: {e}"
+                        "[DeepChat] dsh 宿主进程启动失败（应用将继续运行但无后端功能）: {e}"
                     );
                     // 生产环境可能没有 node 或构建产物，不阻塞 UI 启动
                 }

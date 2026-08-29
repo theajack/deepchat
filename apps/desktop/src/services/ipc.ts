@@ -215,7 +215,7 @@ export class DshTransport implements IpcTransport {
   /** 本地设置桥（M1：暂存 localStorage，后续迁至 dsh settings/credentials） */
   private localSettings(): Record<string, string> {
     try {
-      return JSON.parse(localStorage.getItem('chat-agent:settings') ?? '{}') as Record<string, string>
+      return JSON.parse(localStorage.getItem('deepchat:settings') ?? '{}') as Record<string, string>
     } catch {
       return {}
     }
@@ -251,7 +251,7 @@ export class DshTransport implements IpcTransport {
   private setLocalSetting(key: string, value: string): void {
     const all = this.localSettings()
     all[key] = value
-    localStorage.setItem('chat-agent:settings', JSON.stringify(all))
+    localStorage.setItem('deepchat:settings', JSON.stringify(all))
   }
 
   private async requestInner<T>(method: string, params: Record<string, unknown>): Promise<T> {

@@ -13,7 +13,7 @@ export const useConversationsStore = defineStore('conversations', () => {
   /** 因「当前在聊天」而被加入会话列表的会话 id（即便暂无消息也不移除） */
   const pinned = ref<string[]>([])
   /** 置顶会话 id（持久化到 localStorage） */
-  const PINNED_TOP_KEY = 'chat-agent:pinned-top'
+  const PINNED_TOP_KEY = 'deepchat:pinned-top'
   function loadPinnedTop(): string[] {
     try {
       const v = JSON.parse(localStorage.getItem(PINNED_TOP_KEY) ?? '[]')
