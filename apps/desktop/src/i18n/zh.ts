@@ -28,11 +28,14 @@ export const zh: MessageDict = {
   'browser.systemDesc': '使用操作系统默认浏览器打开',
 
   // 数据目录
-  'dataDir.databaseDesc': '数据存储（好友、群聊、模型记录）',
-  'dataDir.agentsDesc': 'AI 好友工作目录',
-  'dataDir.groupsDesc': '群聊工作目录',
-  'dataDir.sessionsDesc': '会话日志（zstd 压缩）',
-  'dataDir.skillsDesc': '用户安装的技能',
+  'dataDir.databaseDesc': '好友、群聊、模型配置（JSON）',
+  'dataDir.agentsDesc': '每个好友的工作文件与记忆',
+  'dataDir.groupsDesc': '群聊共享工作文件',
+  'dataDir.sessionsDesc': '会话日志（zstd），清空对话即删除',
+  'dataDir.skillsDesc': '已安装的技能包',
+  'dataDir.logsDesc': '运行日志 debug.log',
+  'dataDir.memoryHint': '每个好友的长期记忆存于',
+  'dataDir.botName': '好友',
   'dataDir.root': '根路径：',
   'dataDir.openFailed': '打开目录失败',
 

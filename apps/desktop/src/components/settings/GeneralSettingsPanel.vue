@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Monitor, Moon, Sun, FolderOpen, Globe, AppWindow, Palette, Languages, Database, Bot, Sparkles, ScrollText } from "lucide-vue-next";
+import { Monitor, Moon, Sun, FolderOpen, ExternalLink, Globe, AppWindow, Palette, Languages } from "lucide-vue-next";
 import { computed, onMounted, ref } from "vue";
 import { useThemeStore, type ThemeMode } from "../../stores/theme";
 import { useLocaleStore } from "../../stores/locale";
@@ -42,21 +42,13 @@ const browserOptions = computed<{ value: BrowserPref; label: string; desc: strin
   { value: "system", label: t("browser.system"), desc: t("browser.systemDesc"), icon: Globe },
 ]);
 
-const dataDirs = computed<{ name: string; icon: typeof Database; desc: string }[]>(() => [
-  { name: "storages/", icon: Database, desc: t("dataDir.databaseDesc") },
-  { name: "workspace/agents/", icon: Bot, desc: t("dataDir.agentsDesc") },
-  { name: "workspace/groups/", icon: Bot, desc: t("dataDir.groupsDesc") },
-  { name: "sessions/", icon: ScrollText, desc: t("dataDir.sessionsDesc") },
-  { name: "skills/", icon: Sparkles, desc: t("dataDir.skillsDesc") },
-]);
-
 async function chooseBrowser(pref: BrowserPref) {
   browserPref.value = pref;
   await setBrowserPref(pref);
 }
 
 async function openDataDir(name: string) {
-  const dir = dataDirPaths.value[name];
+  const dir = name === '' ? workspaceDir.value : dataDirPaths.value[name];
   if (!dir) return;
   try {
     await agentApi.toolOpenDir(dir);
@@ -160,21 +152,16 @@ onMounted(async () => {
     <p class="mt-1 text-xs text-lo">
       {{ t("general.dataDirDesc") }}
     </p>
-    <div class="mt-3 flex flex-col gap-1 rounded-lg border border-line bg-ink-1/60 px-2 py-2 font-mono text-[11.5px] text-mid leading-relaxed">
-      <button
-        v-for="d in dataDirs"
-        :key="d.name"
-        type="button"
-        class="group flex items-center gap-2 rounded-md px-2 py-1 text-left transition-colors hover:bg-ink-3"
-        @click="openDataDir(d.name)"
-      >
-        <component :is="d.icon" :size="13" :stroke-width="1.8" class="shrink-0 text-accent" />
-        <span class="underline decoration-dotted underline-offset-[3px] group-hover:text-accent">{{ d.name }}</span>
-        <span class="text-lo">{{ d.desc }}</span>
-      </button>
+    <div
+      class="mt-3 flex cursor-pointer items-center gap-2.5 rounded-lg border border-line bg-ink-1/60 px-3 py-2.5 transition-colors hover:bg-ink-3"
+      @click="openDataDir('')"
+    >
+      <FolderOpen :size="16" class="shrink-0 text-accent" />
+      <div class="min-w-0 flex-1">
+        <p class="text-[12px] leading-relaxed text-mid">{{ t("dataDir.root") }}</p>
+        <p class="truncate font-mono text-[11px] text-lo">{{ workspaceDir }}</p>
+      </div>
+      <ExternalLink :size="14" class="shrink-0 text-lo transition-colors group-hover:text-accent" />
     </div>
-    <p class="mt-2 text-[11px] text-lo">
-      {{ t("dataDir.root") }}<span class="font-mono text-mid">{{ workspaceDir }}</span>
-    </p>
   </section>
 </template>

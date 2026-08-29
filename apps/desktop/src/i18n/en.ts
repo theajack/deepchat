@@ -28,11 +28,14 @@ export const en: MessageDict = {
   'browser.systemDesc': 'Open with the operating system default browser',
 
   // Data directory
-  'dataDir.databaseDesc': 'Data store (bots, groups, model records)',
-  'dataDir.agentsDesc': "AI friends' workspaces",
-  'dataDir.groupsDesc': 'Group workspaces',
-  'dataDir.sessionsDesc': 'Session logs (zstd-compressed)',
-  'dataDir.skillsDesc': 'User-installed skills',
+  'dataDir.databaseDesc': 'Bots, groups, model configs (JSON)',
+  'dataDir.agentsDesc': 'Per-friend work files and memory',
+  'dataDir.groupsDesc': 'Group-shared work files',
+  'dataDir.sessionsDesc': 'Session logs (zstd), deleted on clear',
+  'dataDir.skillsDesc': 'Installed skill packages',
+  'dataDir.logsDesc': 'Runtime log debug.log',
+  'dataDir.memoryHint': "Each friend's long-term memory is stored in",
+  'dataDir.botName': 'friend',
   'dataDir.root': 'Root path: ',
   'dataDir.openFailed': 'Failed to open directory',
 

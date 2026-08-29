@@ -732,6 +732,7 @@ export class ChatBots extends Service {
               { name: 'workspace/groups/', rel: 'workspace/groups' },
               { name: 'sessions/', rel: 'sessions' },
               { name: 'skills/', rel: 'skills' },
+              { name: 'logs/', rel: 'logs' },
             ]
             await Promise.all(entries.map(entry => mkdir(join(root, entry.rel), { recursive: true })))
             return json(200, {
