@@ -14,6 +14,8 @@ import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
 export interface ChatMessageRow {
   readonly id: string
   readonly kind: 'user' | 'assistant'
+  /** Durable cursor for history paging: the newest session event seq this row aggregates. */
+  readonly seq: number
   readonly time: number
   readonly text: string
   readonly senderId: string
@@ -299,6 +301,7 @@ export function aggregateTurn(session: Session, turn: number, endedAt: number, b
   return {
     id: `m-${String(turn)}`,
     kind: 'assistant',
+    seq: 0,
     time: endedAt,
     text,
     senderId: botId,
@@ -357,6 +360,7 @@ export function aggregatePrompt(session: Session, promptSeq: number, botId: stri
   return {
     id: `m-p${String(promptSeq)}`,
     kind: 'assistant',
+    seq: 0,
     time,
     text,
     senderId: botId,
@@ -422,6 +426,7 @@ export function renderPrivateHistory(session: Session, botId: string, botName: s
         rows.push({
           id: `u-${String(event.seq)}`,
           kind: 'user',
+          seq: event.seq,
           time: event.time,
           text,
           senderId: 'me',
@@ -454,7 +459,8 @@ export function renderPrivateHistory(session: Session, botId: string, botName: s
     if (endEvent === undefined) continue
     const row = aggregatePrompt(session, seq, botId, botName)
     if (row.text === '' && row.toolCalls.length === 0) continue
-    mergedByPrompt.set(seq, row)
+    // Cursor = the newest event the row spans, so `before` paging is stable.
+    mergedByPrompt.set(seq, { ...row, seq: endSeq })
   }
 
   // 重排：user 行已在 rows 中，按 prompt 序交错插入聚合行
@@ -472,4 +478,21 @@ export function renderPrivateHistory(session: Session, botId: string, botName: s
     if (merged !== undefined) finalRows.push(merged)
   }
   return finalRows
+}
+
+/**
+ * Cursor-page a chronologically ordered row list (oldest first): take the
+ * `limit` rows strictly older than `before`, i.e. the newest page still
+ * scrolled above the first visible message. `before` omitted → the newest
+ * page. `hasMore` tells the UI whether an even older page exists.
+ */
+export function pageRows<T extends { readonly seq: number }>(
+  rows: readonly T[],
+  before: number | undefined,
+  limit: number,
+): { items: T[]; hasMore: boolean } {
+  const eligible = before === undefined ? rows : rows.filter(row => row.seq < before)
+  const end = eligible.length
+  const start = Math.max(0, end - limit)
+  return { items: eligible.slice(start, end), hasMore: start > 0 }
 }

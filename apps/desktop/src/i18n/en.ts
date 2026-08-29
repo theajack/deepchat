@@ -218,6 +218,7 @@ export const en: MessageDict = {
   'contacts.noMembers': 'No members in this group yet',
   'contacts.noMemberMatch': 'No matching members',
   'chat.botDeleted': 'Friend deleted',
+  'chat.scrollUpForMore': 'Scroll up for earlier messages',
   'conv.botDeleted': 'Friend deleted',
   'contacts.editGroup': 'Edit group',
   'contacts.deleteGroup.title': 'Delete group',

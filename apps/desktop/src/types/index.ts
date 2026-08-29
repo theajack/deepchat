@@ -120,6 +120,8 @@ export interface Message {
   stop_reason?: string
   /** 消息附件（图片 / 文件），发送时附带，历史消息由后端投影 */
   attachments?: MessageAttachment[]
+  /** 后端游标（会话事件 seq），历史向上翻页时作为 before 参数 */
+  seq?: number
 }
 
 /** 工具调用（对齐 CLI PersistedToolCall） */

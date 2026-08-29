@@ -13,6 +13,7 @@ import { useConversationsStore } from "../stores/conversations";
 import { useModelsStore } from "../stores/models";
 import { useSelfStore } from "../stores/self";
 import { useUiStore } from "../stores/ui";
+import { useIncrementalList } from "../composables/useIncrementalList";
 import type { Bot } from "../types";
 import { formatDateTime } from "../utils/display";
 import { showBotDetail, hideBotDetail } from "../utils/botDetailHover";
@@ -28,10 +29,8 @@ const ui = useUiStore();
 
 onMounted(() => {
   if (!models.loaded) models.load();
-  conversations.load().then(() => {
-    // 预加载所有群聊成员，供九宫格头像与详情展示
-    conversations.items.filter((c) => c.type === "group").forEach((g) => conversations.loadMembers(g.id));
-  });
+  // 群聊成员改为按需加载（见下方 watch），首屏不再为每个群聊发一次请求
+  void conversations.load();
 });
 
 /** 群聊成员（供九宫格头像展示），self 由 GroupAvatar 自动追加在末尾 */
@@ -80,6 +79,23 @@ const contactItems = computed<ContactItem[]>(() => {
   if (!kw) return all;
   return all.filter((it) => it.name.toLowerCase().includes(kw) || it.sub.toLowerCase().includes(kw));
 });
+
+// 增量渲染：首屏 20 项，滚动接近底部时追加 20 项
+const list = useIncrementalList(() => contactItems.value, 20);
+const visibleContacts = list.visible;
+// 搜索关键字变化 → 回到第一页
+watch(keyword, () => list.reset());
+
+// 只给可见的群聊加载成员（人数与九宫格按需拉取，避免首屏 N 次请求）
+watch(
+  () => visibleContacts.value.filter((it) => it.kind === "group").map((it) => it.id),
+  (ids) => {
+    for (const id of ids) {
+      if (!conversations.membersMap[id]) void conversations.loadMembers(id);
+    }
+  },
+  { immediate: true },
+);
 
 const selectedBot = computed(() => bots.items.find((b) => b.id === selectedBotId.value) ?? null);
 const selectedGroup = computed(() => conversations.items.find((c) => c.id === selectedGroupId.value) ?? null);
@@ -275,14 +291,14 @@ async function removeMember(bot: Bot) {
       </div>
 
       <!-- 列表 -->
-      <div class="flex-1 overflow-y-auto pb-2.5">
+      <div class="flex-1 overflow-y-auto pb-2.5" @scroll="list.onScroll">
         <template v-if="contactItems.length === 0">
           <div class="px-4 py-10 text-center text-xs text-lo">
             {{ bots.items.length === 0 && !conversations.items.some((c) => c.type === "group") ? t("contacts.empty") : t("contacts.noMatch") }}
           </div>
         </template>
         <div
-          v-for="it in contactItems"
+          v-for="it in visibleContacts"
           :key="it.kind + ':' + it.id"
           class="group relative mx-2 mb-0.5 flex cursor-pointer items-center gap-3 rounded-lg px-2.5 py-2.5 transition-all duration-150 hover:bg-ink-3/70"
           :class="{ '!bg-ink-4': isActive(it) }"

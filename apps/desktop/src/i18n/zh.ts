@@ -218,6 +218,7 @@ export const zh: MessageDict = {
   'contacts.noMembers': '该群聊还没有成员',
   'contacts.noMemberMatch': '没有匹配的成员',
   'chat.botDeleted': '好友已删除',
+  'chat.scrollUpForMore': '向上滚动加载更早的消息',
   'conv.botDeleted': '好友已删除',
   'contacts.editGroup': '编辑群聊',
   'contacts.deleteGroup.title': '删除群聊',

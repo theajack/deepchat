@@ -41,9 +41,16 @@ function omitKey<T>(obj: Record<string, T>, key: string): Record<string, T> {
   return Object.fromEntries(Object.entries(obj).filter(([k]) => k !== key))
 }
 
+/** 历史消息分页大小（向上翻页每次加载的条数） */
+const PAGE_SIZE = 50
+
 /** 消息模块：历史消息 + 流式草稿 + typing 状态 + CLI 事件桥接 */
 export const useMessagesStore = defineStore('messages', () => {
   const byConv = ref<Record<string, Message[]>>({})
+  /** 每个会话是否还有更早的历史（false = 已到顶） */
+  const hasMoreByConv = ref<Record<string, boolean>>({})
+  /** 是否正在向上翻页（并发防护） */
+  const loadingMore = ref(false)
   /** 定位请求：搜索弹窗点击「定位」后，MessageList 滚动到该消息；nonce 用于重复定位同一条消息 */
   const locate = ref<{ conversationId: string; messageId: string; nonce: number } | null>(null)
 
@@ -123,11 +130,47 @@ export const useMessagesStore = defineStore('messages', () => {
 
   let eventsBound = false
 
+  /** 首页只拉最近一页（默认 50 条），更早的由 loadMore 向上翻页补齐 */
   async function load(conversationId: string) {
-    // 默认只加载最近 100 条，保证性能
-    const list = await chatApi.listMessages(conversationId, undefined, 100)
-    byConv.value = { ...byConv.value, [conversationId]: list }
+    const page = await chatApi.listMessages(conversationId, undefined, PAGE_SIZE)
+    byConv.value = { ...byConv.value, [conversationId]: page.items }
+    hasMoreByConv.value = { ...hasMoreByConv.value, [conversationId]: page.hasMore }
+    loadingMore.value = false
     // 恢复历史消息的工具调用展示（刷新后不丢失）
+    cacheHistoryExtras(page.items)
+  }
+
+  /**
+   * 向上翻页：加载最早一条之前的 PAGE_SIZE 条并前置到列表。
+   * 返回新加载的条数（0 表示已到顶），供 UI 恢复滚动位置。
+   */
+  async function loadMore(conversationId: string): Promise<number> {
+    if (loadingMore.value) return 0
+    if (hasMoreByConv.value[conversationId] !== true) return 0
+    const list = byConv.value[conversationId] ?? []
+    const oldest = list[0]
+    if (oldest === undefined || oldest.seq === undefined) return 0
+    loadingMore.value = true
+    try {
+      const page = await chatApi.listMessages(conversationId, oldest.seq, PAGE_SIZE)
+      if (page.items.length === 0) {
+        hasMoreByConv.value = { ...hasMoreByConv.value, [conversationId]: false }
+        return 0
+      }
+      // 防御：并发或重复事件导致的重叠行按 id 去重
+      const known = new Set(list.map(m => m.id))
+      const older = page.items.filter(m => !known.has(m.id))
+      byConv.value = { ...byConv.value, [conversationId]: [...older, ...list] }
+      hasMoreByConv.value = { ...hasMoreByConv.value, [conversationId]: page.hasMore }
+      cacheHistoryExtras(older)
+      return older.length
+    } finally {
+      loadingMore.value = false
+    }
+  }
+
+  /** 缓存历史消息的工具调用与 segments（刷新后不丢失） */
+  function cacheHistoryExtras(list: Message[]): void {
     const tc = { ...toolCalls.value }
     const sc = { ...segmentsCache.value }
     for (const m of list) {
@@ -213,6 +256,7 @@ export const useMessagesStore = defineStore('messages', () => {
           // 包括消息、流式草稿、工具调用与 typing（旧 run 的残留事件一律丢弃）
           const c = frame.data as { conversationId: string }
           byConv.value = { ...byConv.value, [c.conversationId]: [] }
+          hasMoreByConv.value = { ...hasMoreByConv.value, [c.conversationId]: false }
           cleanupDrafts(c.conversationId)
           typing.value = Object.fromEntries(
             Object.entries(typing.value).filter(([key]) => !key.startsWith(`${c.conversationId}:`)))
@@ -491,6 +535,7 @@ export const useMessagesStore = defineStore('messages', () => {
   /** 清空指定会话的本地消息列表及流式草稿 */
   function clearLocal(conversationId: string) {
     byConv.value = { ...byConv.value, [conversationId]: [] }
+    hasMoreByConv.value = { ...hasMoreByConv.value, [conversationId]: false }
     cleanupDrafts(conversationId)
     // 清理该会话流式草稿对应的工具调用记录
     const next = { ...byConv.value }
@@ -503,7 +548,7 @@ export const useMessagesStore = defineStore('messages', () => {
 
   return {
     byConv, streams, typing, toolCalls, getToolCalls, getSegments,
-    load, send, stopGeneration, bindEvents, cleanupDrafts, clearLocal,
-    locate, requestLocate,
+    load, loadMore, send, stopGeneration, bindEvents, cleanupDrafts, clearLocal,
+    locate, requestLocate, hasMoreByConv, loadingMore,
   }
 })

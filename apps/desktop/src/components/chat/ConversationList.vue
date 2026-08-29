@@ -5,6 +5,7 @@ import { useAppStore } from "../../stores/app";
 import { useBotsStore } from "../../stores/bots";
 import { useConversationsStore } from "../../stores/conversations";
 import { useUiStore } from "../../stores/ui";
+import { useIncrementalList } from "../../composables/useIncrementalList";
 import { formatListTime } from "../../utils/display";
 import Avatar from "../common/Avatar.vue";
 import ConfirmModal from "../common/ConfirmModal.vue";
@@ -144,18 +145,6 @@ function onConvLeave() {
 }
 const keyword = ref("");
 
-// 监听群聊列表变化，自动加载缺失的成员（首次渲染即显示人数与九宫格，
-// 而非等首次点击 select 才加载）
-watch(
-  () => conversations.chatList.filter((c) => c.type === "group").map((c) => c.id),
-  (ids) => {
-    for (const id of ids) {
-      if (!conversations.membersMap[id]) void conversations.loadMembers(id);
-    }
-  },
-  { immediate: true },
-);
-
 const filtered = computed(() => {
   const kw = keyword.value.trim().toLowerCase();
   const base = conversations.chatList;
@@ -164,6 +153,23 @@ const filtered = computed(() => {
     (c) => c.name.toLowerCase().includes(kw) || (c.last_message_preview ?? "").toLowerCase().includes(kw),
   );
 });
+
+// 增量渲染：首屏 20 项，滚动接近底部时追加 20 项
+const list = useIncrementalList(() => filtered.value, 20);
+const visible = list.visible;
+// 搜索关键字变化 → 回到第一页，避免残留渲染窗口
+watch(keyword, () => list.reset());
+
+// 只给可见的群聊加载成员（人数与九宫格按需拉取，避免首屏 N 次请求）
+watch(
+  () => visible.value.filter((c) => c.type === "group").map((c) => c.id),
+  (ids) => {
+    for (const id of ids) {
+      if (!conversations.membersMap[id]) void conversations.loadMembers(id);
+    }
+  },
+  { immediate: true },
+);
 </script>
 
 <template>
@@ -187,7 +193,7 @@ const filtered = computed(() => {
         <Plus :size="15" />
       </button>
     </div>
-    <div class="overscroll-contain flex-1 overflow-y-auto pb-2.5">
+    <div class="overscroll-contain flex-1 overflow-y-auto pb-2.5" @scroll="list.onScroll">
       <!-- 会话列表加载中 -->
       <div v-if="conversations.loading" class="flex items-center justify-center gap-2 py-10 text-xs text-lo">
         <Loader2 :size="14" class="animate-spin text-accent" /> {{ t("common.loading") }}
@@ -196,7 +202,7 @@ const filtered = computed(() => {
         {{ conversations.chatList.length === 0 ? t("conv.empty") : t("conv.noMatch") }}
       </div>
       <div
-        v-for="conv in filtered"
+        v-for="conv in visible"
         :key="conv.id"
         class="group relative mx-2 mb-0.5 flex cursor-pointer items-center gap-2.5 rounded-lg px-2.5 py-2.5 transition-all duration-150 hover:bg-ink-3/70"
         :class="{

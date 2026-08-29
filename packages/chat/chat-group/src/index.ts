@@ -37,7 +37,7 @@ import { botSessionRecordSchema, groupRecordSchema } from './schema.ts'
 import { shouldRespond } from './trigger.ts'
 import type { TriggerMessage } from './trigger.ts'
 import type { GroupCreateInput, GroupMessageView, GroupRecord, GroupUpdatePatch } from './types.ts'
-import { aggregateLastRun, translateSessionEvent } from '@deepseek-ai/dsh-chat-bots/bridge'
+import { aggregateLastRun, pageRows, translateSessionEvent } from '@deepseek-ai/dsh-chat-bots/bridge'
 
 export type {
   GroupCreateInput,
@@ -580,7 +580,7 @@ export class ChatGroup extends Service {
       path: '/chatapi/groups',
       handler: async (req, res) => {
         try {
-          const match = /^\/chatapi\/groups\/([^/]+)(\/[a-z]+)?$/.exec(req.url ?? '')
+          const match = /^\/chatapi\/groups\/([^/]+)(\/[a-z]+)?(?=\?|$)/.exec((req.url ?? '').split('?')[0] ?? '')
           const groupId = match?.[1]
           const action = match?.[2]
 
@@ -648,7 +648,16 @@ export class ChatGroup extends Service {
 
           if (action === '/history') {
             if (req.method !== 'GET') return json(res, 405, { error: 'method not allowed' })
-            return json(res, 200, { items: await this.history(groupId) })
+            // 游标分页：?before=<seq> 取更早的一页，?limit=N 页大小（默认 50）
+            const query = new URL(req.url ?? '/', 'http://localhost').searchParams
+            const raw = query.get('before')
+            const before = raw !== null && /^\d+$/.test(raw) ? Number(raw) : undefined
+            const rawLimit = query.get('limit')
+            const limit = rawLimit !== null && /^\d+$/.test(rawLimit)
+              ? Math.min(Math.max(Number(rawLimit), 1), 200)
+              : 50
+            const page = pageRows(await this.history(groupId), before, limit)
+            return json(res, 200, { items: page.items, hasMore: page.hasMore })
           }
 
           if (req.method === 'GET') {

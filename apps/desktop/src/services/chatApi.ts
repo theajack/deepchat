@@ -1,6 +1,12 @@
 import type { Bot, BotInput, Conversation, Message, MessageAttachment, ModelConfig, ModelInput, UpdateConversationInput } from '../types'
 import { transport, type IpcTransport } from './ipc'
 
+/** 一页历史消息 + 是否还有更早的记录 */
+export interface MessagePage {
+  items: Message[]
+  hasMore: boolean
+}
+
 /** 类型化业务 API 门面：stores 只依赖它，不直接感知传输层（SRP + DIP） */
 export class ChatApi {
   constructor(private t: IpcTransport) {}
@@ -62,7 +68,8 @@ export class ChatApi {
     return this.t.request('conversation.delete', { id })
   }
 
-  listMessages(conversationId: string, before?: number, limit = 50): Promise<Message[]> {
+  /** 拉取一页历史消息（游标分页）：before 为已加载最早一行的 seq，省略则取最新一页 */
+  listMessages(conversationId: string, before?: number, limit = 50): Promise<MessagePage> {
     return this.t.request('message.list', { conversationId, before, limit })
   }
   sendMessage(

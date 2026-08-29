@@ -5,11 +5,15 @@ import { useMessagesStore } from "../../stores/messages";
 import { useBotsStore } from "../../stores/bots";
 import { useSelfStore } from "../../stores/self";
 import { formatSeparator } from "../../utils/display";
+import { Loader2 } from "lucide-vue-next";
+import { t } from "../../i18n";
 import MessageBubble, { type BubbleModel } from "./MessageBubble.vue";
 // import ContextMenu, { type ContextMenuState } from "../common/ContextMenu.vue";
 // import { t } from "../../i18n";
 
 const TIME_GAP = 5 * 60 * 1000;
+/** 距顶部小于此值即触发向上翻页（px） */
+const PRELOAD_OFFSET = 120;
 
 type Row = { type: "time"; key: string; text: string } | { type: "msg"; key: string; model: BubbleModel };
 
@@ -28,6 +32,24 @@ function onScroll() {
   if (!el) return;
   const distFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
   stickToBottom.value = distFromBottom < STICK_THRESHOLD;
+  // 划到顶部：加载更早的一页历史
+  if (el.scrollTop < PRELOAD_OFFSET) void loadOlder();
+}
+
+/** 向上翻页：加载更早的 50 条并锚定滚动位置，避免视口跳动 */
+async function loadOlder() {
+  if (!conv.value) return;
+  const convId = conv.value.id;
+  if (messages.loadingMore || messages.hasMoreByConv[convId] !== true) return;
+  const el = bodyRef.value;
+  if (!el) return;
+  const prevHeight = el.scrollHeight;
+  const prevTop = el.scrollTop;
+  const added = await messages.loadMore(convId);
+  if (added === 0) return;
+  // 等 DOM 更新后按新增高度补偿 scrollTop，保持当前可视内容不动
+  await nextTick();
+  el.scrollTop = prevTop + (el.scrollHeight - prevHeight);
 }
 
 onMounted(() => {
@@ -190,6 +212,14 @@ watch(
 
 <template>
   <div ref="bodyRef" class="overscroll-contain flex flex-1 flex-col overflow-y-auto py-2.5 pb-5">
+    <!-- 向上翻页：加载更早的 50 条历史 -->
+    <div v-if="messages.loadingMore" class="flex items-center justify-center gap-2 py-2 text-[11px] text-lo">
+      <Loader2 :size="13" class="animate-spin text-accent" /> {{ t("common.loading") }}
+    </div>
+    <div v-else-if="conv && messages.hasMoreByConv[conv.id]" class="py-2 text-center text-[11px] text-lo/70">
+      {{ t("chat.scrollUpForMore") }}
+    </div>
+
     <template v-for="row in rows" :key="row.key">
       <div v-if="row.type === 'time'" class="my-2 flex items-center justify-center gap-3">
         <span class="h-px w-10 bg-gradient-to-r from-transparent to-line-strong" />

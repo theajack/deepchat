@@ -35,7 +35,7 @@ import { buildBotAgentSetup, resolveEnabledSkills } from './agent-setup.ts'
 import { LlmTraceRecorder } from './llm-trace.ts'
 import { writeBotAvatar } from './avatar.ts'
 import { configureDebugLog, debugLog, isDebugLogEnabled, tailDebugLog, DEBUG_LOG_PATH } from './debug-log.ts'
-import { renderPrivateHistory, translateSessionEvent } from './bridge.ts'
+import { pageRows, renderPrivateHistory, translateSessionEvent } from './bridge.ts'
 import { defineDomain, domainTable } from '@deepseek-ai/dsh-storage-domain'
 import type { Domain } from '@deepseek-ai/dsh-storage-domain'
 import type { BotCreateInput, BotRecord, BotUpdatePatch } from './types.ts'
@@ -969,7 +969,7 @@ export class ChatBots extends Service {
       path: '/chatapi/bots',
       handler: async (req, res) => {
         try {
-          const match = /^\/chatapi\/bots(?:\/([^/]+))?(\/[a-z]+)?$/.exec(req.url ?? '')
+          const match = /^\/chatapi\/bots(?:\/([^/]+))?(\/[a-z]+)?(?=\?|$)/.exec((req.url ?? '').split('?')[0] ?? '')
           if (match === null) return json(res, 404, { error: 'not found' })
           const botId = match[1]
           const action = match[2]
@@ -1042,7 +1042,16 @@ export class ChatBots extends Service {
             const bot = this.get(botId)
             if (bot === undefined) return json(res, 404, { error: 'bot not found' })
             const agent = await this.ensureAgent(botId)
-            return json(res, 200, { items: renderPrivateHistory(agent.session, bot.id, bot.name) })
+            // 游标分页：?before=<seq> 取更早的一页，?limit=N 页大小（默认 50）
+            const query = new URL(req.url ?? '/', 'http://localhost').searchParams
+            const raw = query.get('before')
+            const before = raw !== null && /^\d+$/.test(raw) ? Number(raw) : undefined
+            const rawLimit = query.get('limit')
+            const limit = rawLimit !== null && /^\d+$/.test(rawLimit)
+              ? Math.min(Math.max(Number(rawLimit), 1), 200)
+              : 50
+            const page = pageRows(renderPrivateHistory(agent.session, bot.id, bot.name), before, limit)
+            return json(res, 200, { items: page.items, hasMore: page.hasMore })
           }
 
           if (req.method === 'GET') {

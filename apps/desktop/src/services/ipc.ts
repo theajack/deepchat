@@ -66,6 +66,7 @@ interface DshToolCallRow {
 
 interface DshMessageRow {
   id?: string
+  /** 持久游标：历史分页的 before 依据 */
   seq?: number
   time: number
   kind: 'user' | 'bot' | 'assistant'
@@ -177,6 +178,7 @@ function toFrontMessage(row: DshMessageRow, conversationId: string): FrontMessag
   return {
     id: row.id ?? `${conversationId}:${String(row.seq ?? row.time)}`,
     conversation_id: conversationId,
+    seq: row.seq,
     sender_type: isSelf ? 'user' : 'ai_bot',
     sender_id: row.senderId,
     sender_name: row.senderName,
@@ -358,13 +360,21 @@ export class DshTransport implements IpcTransport {
     // ── message ──
     if (method === 'message.list') {
       const conversationId = String(params.conversationId)
+      // 游标分页：before = 已加载最早一行的 seq，limit = 页大小
+      const before = typeof params.before === 'number' ? params.before : undefined
+      const limit = typeof params.limit === 'number' ? params.limit : undefined
+      const query = [
+        ...(before !== undefined ? [`before=${String(before)}`] : []),
+        ...(limit !== undefined ? [`limit=${String(limit)}`] : []),
+      ].join('&')
+      const suffix = query === '' ? '' : `?${query}`
       if (conversationId.startsWith('private:')) {
         const botId = botIdOfPrivate(conversationId)
-        const { items } = await dshGet<{ items: DshMessageRow[] }>(`/chatapi/bots/${botId}/history`)
-        return items.map(row => toFrontMessage(row, conversationId)) as T
+        const page = await dshGet<{ items: DshMessageRow[]; hasMore?: boolean }>(`/chatapi/bots/${botId}/history${suffix}`)
+        return { items: page.items.map(row => toFrontMessage(row, conversationId)), hasMore: page.hasMore ?? false } as T
       }
-      const { items } = await dshGet<{ items: DshMessageRow[] }>(`/chatapi/groups/${conversationId}/history`)
-      return items.map(row => toFrontMessage(row, conversationId)) as T
+      const page = await dshGet<{ items: DshMessageRow[]; hasMore?: boolean }>(`/chatapi/groups/${conversationId}/history${suffix}`)
+      return { items: page.items.map(row => toFrontMessage(row, conversationId)), hasMore: page.hasMore ?? false } as T
     }
     if (method === 'message.send') {
       const conversationId = String(params.conversationId)
