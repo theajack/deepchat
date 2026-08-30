@@ -209,6 +209,12 @@ interface ModelsDomainView {
 /** Storage key holding the user's default-model choice. */
 export const DEFAULT_MODEL_KEY = 'default_model_id'
 
+/**
+ * Storage key holding the group-scheduling model: the one-shot "who should
+ * speak next" arbitrator that replaces per-member probability rolls.
+ */
+export const GROUP_JUDGE_MODEL_KEY = 'group_judge_model_id'
+
 /** Structural view of the shared `meta` key/value table. */
 interface MetaDomainView {
   table(name: 'meta'): {
@@ -219,37 +225,52 @@ interface MetaDomainView {
 }
 
 /**
- * The user's default-model choice, kept beside the records in the shared
- * `meta` table. Separate from {@link ModelStore} so each holder sees exactly
- * the one table it needs.
+ * One model preference persisted in the shared `meta` table — e.g. the default
+ * model, or the group-scheduling model.
+ *
+ * Separate from {@link ModelStore} so each holder sees exactly the one table it
+ * needs, and parameterised by key so several preferences share one
+ * implementation instead of duplicating it.
  */
-export class DefaultModelStore {
+export class ModelPreferenceStore {
   constructor(
     private readonly domain: MetaDomainView,
     private readonly models: ModelStore,
+    private readonly key: string,
   ) {}
 
   /** The chosen model id, or undefined when never set. */
   id(): string | undefined {
-    return this.domain.table('meta').get(DEFAULT_MODEL_KEY)
+    return this.domain.table('meta').get(this.key)
   }
 
   async set(modelId: string): Promise<void> {
-    await this.domain.table('meta').put(DEFAULT_MODEL_KEY, modelId)
+    await this.domain.table('meta').put(this.key, modelId)
   }
 
   async clear(): Promise<void> {
-    await this.domain.table('meta').delete(DEFAULT_MODEL_KEY)
+    await this.domain.table('meta').delete(this.key)
   }
 
   /**
-   * The model to use for background work (memory consolidation): the explicit
-   * default when it still exists, otherwise the newest record — i.e. "whatever
-   * the user configured", falling back to "the first model available".
+   * Only the explicit choice, with no fallback. Undefined when unset or when
+   * the chosen record no longer exists.
+   *
+   * Needed by preference chains: a caller must be able to tell "the user
+   * picked nothing here" (so the next preference in the chain applies) from
+   * "the user picked something invalid" (which should also fall through).
+   */
+  resolveExplicit(): ModelRecord | undefined {
+    const id = this.id()
+    return id === undefined ? undefined : this.models.get(id)
+  }
+
+  /**
+   * The effective model: the explicit choice when it still exists, otherwise
+   * the newest record — i.e. "whatever the user configured", falling back to
+   * "the first model available".
    */
   resolve(): ModelRecord | undefined {
-    const id = this.id()
-    const explicit = id === undefined ? undefined : this.models.get(id)
-    return explicit ?? this.models.list()[0]
+    return this.resolveExplicit() ?? this.models.list()[0]
   }
 }

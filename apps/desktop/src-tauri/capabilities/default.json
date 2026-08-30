@@ -27,6 +27,7 @@
     "core:event:allow-emit-to",
     "core:event:allow-listen",
     "opener:default",
+    "dialog:default",
     {
       "identifier": "http:default",
       "allow": [

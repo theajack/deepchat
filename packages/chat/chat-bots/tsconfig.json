@@ -46,6 +46,9 @@
     },
     {
       "path": "../../host/webserver"
+    },
+    {
+      "path": "../../fs/fs"
     }
   ]
 }

@@ -12,6 +12,7 @@ import { existsSync } from 'node:fs'
 import { isAbsolute, join, resolve } from 'node:path'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { isSkillName, renderSkillContent } from '@deepseek-ai/dsh-skill'
+import { registerReadDocumentTool } from './read-document.ts'
 import type { BotRecord } from './types.ts'
 
 /** One model-invocable enabled-skill catalog entry, resolved before agent creation (setup stays sync). */
@@ -247,6 +248,16 @@ export function buildBotAgentSetup(
       name: 'chat:fetch-preference',
       order: 1,
       text: '当需要获取某个链接/接口的返回内容时，优先调用 `fetch` 工具，而不是用 curl 或 bash 命令（curl 对含中文或已编码参数的 URL 可能拿不到响应体）。',
+    })
+
+    // read_document 工具：解析 docx/xlsx/pptx/pdf。这些是二进制格式，
+    // 通用 `read` 工具会直接拒绝，模型若不知道有本工具就会束手无策
+    // （甚至尝试自己解压 OOXML）。
+    registerReadDocumentTool(agentCtx)
+    agentCtx.systemPrompt.section({
+      name: 'chat:document-preference',
+      order: 1,
+      text: '【重要】当用户提到或发来 .docx/.xlsx/.pptx/.pdf 文件时，必须调用 `read_document` 工具读取，不要用 `read`——`read` 只处理纯文本，遇到这些二进制格式会直接报错。也不要尝试用 bash 解压或用 python 自己解析它们。注意：旧版格式 .doc/.xls/.ppt 不支持，需要请用户另存为对应的 .docx/.xlsx/.pptx。',
     })
 
     // 工具白名单：restrict 过滤该 agent 继承的全局工具面（未列入的工具

@@ -1,9 +1,10 @@
 /** 与 CLI 侧 db/types.ts 对齐的 DTO */
 
 export interface TriggerConfig {
-  active_rate: number
-  keywords: string[]
-  cooldown_seconds: number
+  /** 是否允许在群里主动发言；false = 仅被 @ 或回应他人时发言 */
+  auto_speak: boolean
+  /** 群聊安静多少分钟后该成员主动开口（仅 auto_speak 开启时生效） */
+  idle_trigger_minutes: number
 }
 
 export type ModelProvider = 'openai' | 'anthropic' | 'mock'

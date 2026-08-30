@@ -33,12 +33,30 @@ import type {} from '@deepseek-ai/dsh-tools'
 import { defineDomain, domainTable } from '@deepseek-ai/dsh-storage-domain'
 import type { Domain } from '@deepseek-ai/dsh-storage-domain'
 import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
-import { botSessionRecordSchema, groupRecordSchema } from './schema.ts'
-import { shouldRespond } from './trigger.ts'
+import { botSessionRecordSchema, groupRecordSchema, settingValueSchema } from './schema.ts'
+import { scheduleSpeakers } from './scheduler.ts'
 import type { TriggerMessage } from './trigger.ts'
+import { appendFile } from 'node:fs/promises'
+
+/**
+ * TEMPORARY troubleshooting trace — will be removed once the cascade gap is confirmed.
+ *
+ * Writes to `$DSH_HOME/logs/group-trace.log` because `ctx.logger.info/warn`
+ * does not reach debug.log (same issue as memory consolidation).
+ * Also writes to stderr so logs are always visible in the terminal.
+ */
+async function traceGroup(message: string): Promise<void> {
+  // Always write to stderr — guaranteed visible in tauri dev terminal
+  process.stderr.write(`[group-trace] ${message}\n`)
+  try {
+    const dir = join(resolveDshHome(), 'logs')
+    await mkdir(dir, { recursive: true })
+    await appendFile(join(dir, 'group-trace.log'), `[${new Date().toISOString()}] ${message}\n`, 'utf8')
+  } catch { /* never block */ }
+}
 import type { GroupCreateInput, GroupMessageView, GroupRecord, GroupUpdatePatch } from './types.ts'
 import { aggregateLastRun, pageRows, translateSessionEvent } from '@deepseek-ai/dsh-chat-bots/bridge'
-import { extractTranscript, type MemorySourceRow } from '@deepseek-ai/dsh-chat-bots'
+import { extractTranscript, routeIdFor, type MemorySourceRow } from '@deepseek-ai/dsh-chat-bots'
 
 export type {
   GroupCreateInput,
@@ -48,12 +66,23 @@ export type {
 } from './types.ts'
 export { shouldRespond } from './trigger.ts'
 export type { TriggerContext, TriggerMessage } from './trigger.ts'
+export { parseSpeakerIds, scheduleSpeakers } from './scheduler.ts'
+export type { ScheduleCandidate, ScheduleRequest } from './scheduler.ts'
 
 /** Cordis plugin name. */
 export const name = 'chat-group'
 
-/** Bot registry, agent registry, storage domain, and the HTTP carrier are required. */
-export const inject = ['chatBots', 'agents', 'storageDomain', 'webServer']
+/**
+ * Bot registry, agent registry, the LLM seam (the speaker scheduler calls it
+ * directly), tool registry (`buildBotAgentSetup` reads `ctx.tools.schemas()`
+ * for the per-bot tool whitelist — omitting it throws "cannot get property
+ * \"tools\" without inject" the moment a bot with a non-empty whitelist is
+ * woken, silently killing that member's turn), skill registry
+ * (`resolveEnabledSkills` snapshots `ctx.skills`, and the scoped `skill`
+ * loader tool resolves `ctx.skills.get` at call time), storage domain, and
+ * the HTTP carrier are required.
+ */
+export const inject = ['chatBots', 'agents', 'llm', 'tools', 'skills', 'storageDomain', 'webServer', 'fs']
 
 /** Plugin config. */
 export interface Config {
@@ -61,15 +90,64 @@ export interface Config {
   readonly maxGroupRounds?: number
   /** Recent group messages rendered into each bot's relay context. */
   readonly contextWindow?: number
+  /** How many bots the scheduler may pick in one round. */
+  readonly maxSpeakersPerRound?: number
+  /**
+   * Force one bot to speak when the scheduler picks nobody.
+   * Off by default: the whole point is letting the AI decide to stay quiet.
+   */
+  readonly fallbackEnabled?: boolean
+  /**
+   * Whether the scheduling model arbitrates who speaks each round.
+   *
+   * On (default) the scheduler reads the transcript plus every candidate's
+   * persona and decides who should answer, and stays quiet when nobody
+   * should. Off, the first eligible member simply answers every time — no
+   * arbitration call and no "thinking" pause, at the cost of far less
+   * natural turn-taking. This is the static default; the UI toggle is stored
+   * in the domain's `settings` table and overrides it.
+   */
+  readonly schedulerEnabled?: boolean
 }
 
 const DEFAULT_MAX_GROUP_ROUNDS = 3
 const DEFAULT_CONTEXT_WINDOW = 20
+const DEFAULT_MAX_SPEAKERS_PER_ROUND = 1
+
+/**
+ * Hard cap on how many members may answer one message.
+ *
+ * One voice per turn is a deliberate product decision: letting several bots
+ * pile onto the same message makes the group read like a monologue of
+ * overlapping replies and burns through the round budget almost instantly.
+ * Configuration may lower this (to 0) but never raise it.
+ */
+const MAX_SPEAKERS_PER_ROUND_CAP = 1
+
+/**
+ * How often the idle auto-speak tick scans the groups.
+ *
+ * 30s is coarse enough to be free and fine enough that a "5 minutes of
+ * silence" promise never overshoots by a noticeable margin.
+ */
+const IDLE_CHECK_INTERVAL_MS = 30_000
+
+/**
+ * Idle window (minutes) used when a bot enabled auto-speak but carries no
+ * explicit value — the middle of the 5–10 range the UI defaults into.
+ */
+const DEFAULT_IDLE_TRIGGER_MINUTES = 7
 
 export const Config: z<Config> = z.object({
   maxGroupRounds: z.natural().default(DEFAULT_MAX_GROUP_ROUNDS),
   contextWindow: z.natural().default(DEFAULT_CONTEXT_WINDOW),
+  maxSpeakersPerRound: z.natural().default(DEFAULT_MAX_SPEAKERS_PER_ROUND),
+  fallbackEnabled: z.boolean().default(false),
+  schedulerEnabled: z.boolean().default(true),
 })
+
+/** Storage key for the user-facing "scheduler decides who speaks" toggle. */
+const SCHEDULER_ENABLED_KEY = 'scheduler_enabled'
 
 /** The durable group-record storage domain. */
 const groupsDomainSpec = defineDomain({
@@ -80,6 +158,9 @@ const groupsDomainSpec = defineDomain({
     // Per-(group, bot) chat sessions: a bot's group-chat memory, kept separate
     // from its private-chat session so histories never cross-contaminate.
     bot_sessions: domainTable<string, { sessionId: SessionId; createdAt: number; updatedAt: number }>(botSessionRecordSchema),
+    // Domain-wide settings, keyed by name. Values are plain strings so adding
+    // a setting later never needs a schema migration.
+    settings: domainTable<string, string>(settingValueSchema),
   },
 })
 
@@ -101,6 +182,33 @@ export class ChatGroup extends Service {
 
   /** Last group-reply time per bot id (epoch ms); in-memory cooldown state. */
   private readonly lastSpoke = new Map<string, number>()
+
+  /**
+   * Last activity time per group id (epoch ms) — the baseline the idle
+   * auto-speak tick measures silence against. Seeded on first sight so a
+   * freshly loaded group does not fire immediately.
+   */
+  private readonly groupActivity = new Map<string, number>()
+
+  /** Groups with a cascade in flight; the idle tick leaves them alone. */
+  private readonly cascading = new Set<string>()
+
+  /**
+   * Who last broke the silence in each group, and when. Stops one bot from
+   * monologuing at itself: after an unprompted turn nobody answered, the same
+   * bot is skipped next time and the group is allowed to stay quiet.
+   */
+  private readonly lastIdleTurn = new Map<string, { botId: string; at: number }>()
+
+  /**
+   * Groups the user has asked to stop.
+   *
+   * Cancelling the running turn alone is not enough: the cascade would just
+   * schedule the next member and the conversation would never end. This flag
+   * is what actually breaks the loop — checked before each speaker and
+   * between rounds, and cleared by the user's next message.
+   */
+  private readonly stopped = new Set<string>()
 
   constructor(ctx: Context, private readonly config: Config) {
     super(ctx, 'chatGroup')
@@ -214,11 +322,20 @@ export class ChatGroup extends Service {
       await groups.put(id, { ...group, workspaceDir, updatedAt: Date.now() })
     }
     this.registerEventBridge()
+    this.startIdleTrigger()
   }
 
   /** Broadcast one legacy-shaped event frame through the chat-bots SSE channel. */
   private broadcast(event: string, data: unknown): void {
     this.ctx.chatBots.broadcast(event, data)
+  }
+
+  /**
+   * Tell the UI the group is deciding who speaks next, so it can show a
+   * "members are thinking" placeholder while the scheduler runs.
+   */
+  private broadcastScheduling(groupId: string, active: boolean): void {
+    this.broadcast('group.scheduling', { conversationId: groupId, active })
   }
 
   /**
@@ -458,6 +575,9 @@ export class ChatGroup extends Service {
     if (group === undefined) throw new Error(`chat-group: group "${groupId}" not found`)
     const container = await this.containerAgent(groupId)
     container.session.append('group/user-message', { text, senderName })
+    this.groupActivity.set(group.id, Date.now())
+    // 用户重新开口即解除上一次的停止，否则此后该群永远不会再有 AI 回应
+    this.stopped.delete(group.id)
     void this.runCascade(group, { senderId: 'user', senderName, text })
       .catch(error => this.ctx.logger.error('chat-group cascade: %o', error))
   }
@@ -474,36 +594,259 @@ export class ChatGroup extends Service {
     )
     const hasMention = mentionedBotIds.size > 0
 
-    for (let round = 0; round < maxRounds; round++) {
-      const responders: BotRecord[] = []
-      for (const botId of group.memberBotIds) {
-        if (botId === message.senderId) continue
-        if (round === 0 && hasMention && !mentionedBotIds.has(botId)) continue
-        const bot = this.ctx.chatBots.get(botId)
-        if (bot === undefined) continue
-        const respond = shouldRespond(bot, message, {
-          lastSpokeAt: this.lastSpoke.get(botId) ?? null,
-          now: Date.now(),
-          random: Math.random,
-        })
-        if (respond) responders.push(bot)
-      }
-      if (responders.length === 0) return
-
-      let last: TriggerMessage | null = null
-      for (const bot of responders) {
-        const spoken = await this.speak(group, bot)
-        if (spoken !== null) last = spoken
-      }
-      if (last === null) return
-      message = last
+    // 占用该群：空闲触发器会跳过正在说话的群，避免两段对话交错重叠
+    this.cascading.add(group.id)
+    try {
+      await this.cascadeRounds(group, message, maxRounds, hasMention, mentionedBotIds)
+    } finally {
+      this.cascading.delete(group.id)
+      // 兜底：任何退出路径都必须关掉指示器，否则群里会一直挂着"思考中"
+      this.broadcastScheduling(group.id, false)
     }
   }
 
-  /** Drive one bot's group reply; returns its message for the next round. */
-  private async speak(group: GroupRecord, bot: BotRecord): Promise<TriggerMessage | null> {
-    const container = await this.containerAgent(group.id)
-    const agent = await this.ensureBotAgent(group, bot)
+  /**
+   * The cascade loop: each round asks the scheduler who should speak next,
+   * then lets them speak, then feeds the result back in as the new latest
+   * message. Stops when nobody is chosen, nobody actually speaks, or the
+   * round budget is spent.
+   */
+  private async cascadeRounds(
+    group: GroupRecord,
+    message: TriggerMessage,
+    maxRounds: number,
+    hasMention: boolean,
+    mentionedBotIds: ReadonlySet<string>,
+  ): Promise<void> {
+    for (let round = 0; round < maxRounds; round++) {
+      // 用户点了停止：不再发起新一轮调度，对话到此为止
+      if (this.stopped.has(group.id)) {
+        await traceGroup(`ROUND ${round}: STOPPED by user → cascade aborts`)
+        return
+      }
+      await traceGroup(`=== ROUND ${round} | sender=${message.senderId} text="${message.text.slice(0, 80)}" ===`)
+      // 每一轮调度都单独显示一次"思考中"：AI 接话后还会再决策一次要不要
+      // 有人接着说，这个过程同样需要反馈，否则用户会以为卡住了。
+      const responders = await this.scheduleRound(group, message, round, hasMention, mentionedBotIds)
+      await traceGroup(`ROUND ${round}: responders=${responders.length} [${responders.map(b => b.id).join(',')}]`)
+      if (responders.length === 0) {
+        await traceGroup(`ROUND ${round}: EMPTY → cascade ends`)
+        return
+      }
+
+      const last = await this.speakResponders(group, responders)
+      // 停止可能在发言过程中发生（speak 内部会提前返回），这里再确认一次
+      if (this.stopped.has(group.id)) {
+        await traceGroup(`ROUND ${round}: STOPPED by user after speaking → cascade aborts`)
+        return
+      }
+      if (last === null) {
+        await traceGroup(`ROUND ${round}: last=null → cascade ends`)
+        return
+      }
+      message = last
+    }
+    await traceGroup('cascade finished (max rounds reached)')
+  }
+
+  /**
+   * One scheduler decision, wrapped in the group's "thinking..." indicator.
+   *
+   * The indicator covers exactly the LLM call that decides who speaks — it
+   * turns on when the decision starts and off the moment the answer lands.
+   * The speaking that follows is driven by `bot.typing` / the streaming draft
+   * instead, so the two never overlap into one long, undifferentiated wait.
+   */
+  private async scheduleRound(
+    group: GroupRecord,
+    message: TriggerMessage,
+    round: number,
+    hasMention: boolean,
+    mentionedBotIds: ReadonlySet<string>,
+  ): Promise<BotRecord[]> {
+    this.broadcastScheduling(group.id, true)
+    try {
+      return await this.selectResponders(group, message, round, hasMention, mentionedBotIds)
+    } finally {
+      this.broadcastScheduling(group.id, false)
+    }
+  }
+
+  /** Serially speak each responder in order and return the final spoken message. */
+  private async speakResponders(group: GroupRecord, responders: BotRecord[]): Promise<TriggerMessage | null> {
+    let last: TriggerMessage | null = null
+    for (const bot of responders) {
+      // 用户已停止：跳过尚未开口的成员
+      if (this.stopped.has(group.id)) {
+        await traceGroup(`speakResponders: STOPPED → skipping bot=${bot.id}`)
+        break
+      }
+      await traceGroup(`speakResponders: bot=${bot.id}`)
+      try {
+        const spoken = await this.speak(group, bot)
+        await traceGroup(`speakResponders: bot=${bot.id} result=${spoken === null ? 'NULL' : 'OK'}`)
+        if (spoken !== null) last = spoken
+      } catch (error: unknown) {
+        await traceGroup(`speakResponders: bot=${bot.id} THREW ${error instanceof Error ? error.message : String(error)}`)
+      }
+    }
+    return last
+  }
+
+  /**
+   * Pick who speaks next: the scheduler decides, the rule engine is the
+   * fallback for when it cannot be consulted.
+   *
+   * Responders are ordered — the cascade speaks them serially, so a later bot
+   * sees what the earlier one just said and can genuinely build on it.
+   */
+  private async selectResponders(
+    group: GroupRecord,
+    message: TriggerMessage,
+    round: number,
+    hasMention: boolean,
+    mentionedBotIds: ReadonlySet<string>,
+  ): Promise<BotRecord[]> {
+    // Hard constraints, no model involved: the sender never replies to itself,
+    // and a mention only obliges the mentioned bots on the first round.
+    const eligible = group.memberBotIds
+      .filter(botId => botId !== message.senderId)
+      .filter(botId => !(round === 0 && hasMention && !mentionedBotIds.has(botId)))
+      .map(botId => this.ctx.chatBots.get(botId))
+      .filter((bot): bot is BotRecord => bot !== undefined)
+
+    // A mention is an unconditional obligation.
+    const forced = eligible.filter(bot => message.text.includes(`@${bot.name}`))
+
+    // Everyone else is a scheduler candidate: any member may be chosen to
+    // answer what someone else just said.
+    //
+    // `autoSpeak` deliberately does NOT gate this. It only governs breaking a
+    // silence on one's own (the idle trigger) — a member that never speaks
+    // unprompted must still be able to hold up its side of the conversation
+    // once spoken to, otherwise the new default (off) would mute everyone.
+    //
+    // The old cooldown gate is gone with it: the UI no longer exposes a
+    // cooldown, so keeping it would silently cut conversations short using a
+    // value nobody can see or change.
+    const candidates = eligible.filter(bot => !forced.includes(bot))
+
+    await traceGroup(`selectResponders: eligible=${eligible.length} forced=${forced.length} candidates=${candidates.length} [${candidates.map(b => b.id).join(',')}]`)
+
+    const scheduled = await this.runScheduler(group, candidates, message)
+    // Belt-and-suspenders: the scheduler's parseSpeakerIds already validates
+    // against the candidate whitelist, but the caller may also pass a
+    // TriggerMessage whose senderId is a bot (cascade round ≥ 1). Filter one
+    // more time so a bot can never end up in its own responder list.
+    //
+    // One speaker per turn, even when several members were @-mentioned: the
+    // rest get their turn in the following cascade rounds rather than all
+    // talking over the same message at once.
+    const all = [...forced, ...scheduled].filter(bot => bot.id !== message.senderId)
+    const responders = all.slice(0, MAX_SPEAKERS_PER_ROUND_CAP)
+
+    await traceGroup(`selectResponders: RESULT forced=${forced.length} scheduled=${scheduled.length} picked=${responders.length}/${all.length} [${responders.map(b => b.id).join(',')}]`)
+    if (responders.length > 0) return responders
+
+    // Nobody chose to speak. With the fallback off (default) that is a valid
+    // outcome — the group simply stays quiet.
+    if (this.config.fallbackEnabled !== true) return []
+    const fallback = candidates[0] ?? eligible.find(bot => !forced.includes(bot))
+    return fallback === undefined ? [] : [fallback]
+  }
+
+  /**
+   * One scheduling call over the candidate pool.
+   *
+   * Falls back to the probability rule engine when no scheduling model is
+   * configured, or when the call fails — availability beats intelligence here.
+   */
+  private async runScheduler(group: GroupRecord, candidates: BotRecord[], message: TriggerMessage): Promise<BotRecord[]> {
+    if (candidates.length === 0) return []
+    const maxSpeakers = Math.min(
+      this.config.maxSpeakersPerRound ?? DEFAULT_MAX_SPEAKERS_PER_ROUND,
+      MAX_SPEAKERS_PER_ROUND_CAP,
+    )
+    if (maxSpeakers <= 0) return []
+
+    // 关闭发言调度者：不做判断，直接由排在最前的候选成员接话。省掉一次
+    // 仲裁调用与"思考中"的停顿，代价是接话不再看人设与语境。
+    if (!this.schedulerEnabled()) {
+      await traceGroup(`runScheduler: DISABLED → first candidate [${candidates[0]?.id ?? ''}]`)
+      return candidates.slice(0, maxSpeakers)
+    }
+
+    const model = this.ctx.chatBots.groupJudgeModel()
+    await traceGroup(`runScheduler: model=${model?.id ?? 'NONE'} candidateIds=[${candidates.map(b => b.id).join(',')}]`)
+    if (model !== undefined) {
+      try {
+        const container = await this.containerAgent(group.id)
+        const now = Date.now()
+        const ids = await scheduleSpeakers({
+          ctx: this.ctx,
+          groupName: group.name,
+          transcript: renderTranscript(container.session, this.config.contextWindow ?? DEFAULT_CONTEXT_WINDOW),
+          // 发言人不在候选里，模型必须知道是谁在说话，否则容易选它或判定无人回应
+          lastSpeakerName: message.senderName ?? (message.senderId === 'user' ? '用户' : '另一位成员'),
+          candidates: candidates.map((bot) => {
+            const lastSpokeAt = this.lastSpoke.get(bot.id)
+            return {
+              id: bot.id,
+              name: bot.name,
+              persona: bot.persona,
+              topics: bot.trigger.keywords,
+              silentForSeconds: lastSpokeAt === undefined ? null : (now - lastSpokeAt) / 1000,
+            }
+          }),
+          maxSpeakers,
+          provider: routeIdFor(model.id),
+          model: model.modelName,
+        })
+        const byId = new Map(candidates.map(bot => [bot.id, bot]))
+        // Log each ID mapping to detect mismatches
+        for (const id of ids) {
+          const found = byId.has(id)
+          await traceGroup(`runScheduler: id mapping "${id}" → ${found ? 'FOUND' : 'MISSING in candidates'}`)
+        }
+        const mapped = ids.map(id => byId.get(id)).filter((bot): bot is BotRecord => bot !== undefined)
+        await traceGroup(`runScheduler: raw=[${ids.join(',')}] mapped=${mapped.length} [${mapped.map(b => b.id).join(',')}]`)
+        return mapped
+      } catch (error: unknown) {
+        await traceGroup(`runScheduler: THREW ${error instanceof Error ? error.message : String(error)}`)
+        this.ctx.logger.warn('chat-group: scheduling failed, falling back to rules: %o', error)
+      }
+    }
+
+    return candidates.slice(0, maxSpeakers)
+  }
+
+  /**
+   * Drive one bot's group reply; returns its message for the next round.
+   *
+   * @param mode - `'reply'` when answering what someone just said (the normal
+   * cascade case); `'idle'` when the bot is breaking a silence on its own, in
+   * which case the nudge asks it to start something rather than to respond.
+   */
+  private async speak(
+    group: GroupRecord,
+    bot: BotRecord,
+    mode: 'reply' | 'idle' = 'reply',
+  ): Promise<TriggerMessage | null> {
+    await traceGroup(`speak(${bot.id}): start`)
+    let container: Awaited<ReturnType<typeof this.containerAgent>>
+    try {
+      container = await this.containerAgent(group.id)
+    } catch (e) {
+      await traceGroup(`speak(${bot.id}): containerAgent THREW ${e instanceof Error ? e.message : String(e)}`)
+      throw e
+    }
+    let agent: Awaited<ReturnType<typeof this.ensureBotAgent>>
+    try {
+      agent = await this.ensureBotAgent(group, bot)
+    } catch (e) {
+      await traceGroup(`speak(${bot.id}): ensureBotAgent THREW ${e instanceof Error ? e.message : String(e)}`)
+      throw e
+    }
     const context = renderGroupContext(container.session, this.config.contextWindow ?? DEFAULT_CONTEXT_WINDOW)
 
     // Hidden durable context: the rendered group transcript (relay form).
@@ -512,8 +855,11 @@ export class ChatGroup extends Service {
       source: { kind: 'plugin', plugin: 'chat-group', form: 'relay' },
     }))
     // The waking turn: a notice-shaped nudge, never a fake human message.
+    const nudge = mode === 'idle'
+      ? '群里已经安静了一段时间。现在轮到你主动开口：以你的性格起一个新话题、分享一个想法、或者向其他成员提问，让群聊继续下去。不要复述上面的记录，直接说你想说的话。'
+      : '群聊轮到你了。请根据上面群聊记录中与你相关的内容直接给出你的回复；没有可回应的就简短回应。'
     agent.followup(createUserMessage({
-      content: [{ type: 'text', text: '群聊轮到你了。请根据上面群聊记录中与你相关的内容直接给出你的回复；没有可回应的就简短回应。' }],
+      content: [{ type: 'text', text: nudge }],
       source: {
         kind: 'plugin',
         plugin: 'chat-group',
@@ -521,10 +867,15 @@ export class ChatGroup extends Service {
         summary: '群聊轮次',
       },
     }))
+    await traceGroup(`speak(${bot.id}): followup sent, waiting whenIdle...`)
     await agent.whenIdle()
+    await traceGroup(`speak(${bot.id}): whenIdle resolved, checking lastAssistantText`)
 
     const text = lastAssistantText(agent.session)
-    if (text === null) return null
+    if (text === null) {
+      await traceGroup(`speak(${bot.id}): lastAssistantText returned NULL — bot produced no text`)
+      return null
+    }
     // 聚合该次 run 的统计（usage/segments/工具调用/时长）随事件落库，
     // 群聊气泡的统计行与刷新后的历史渲染都从这里取
     const run = aggregateLastRun(agent.session, bot.id, bot.name)
@@ -555,7 +906,122 @@ export class ChatGroup extends Service {
     }
     container.session.append('group/bot-message', appendData)
     this.lastSpoke.set(bot.id, Date.now())
+    this.groupActivity.set(group.id, Date.now())
     return { senderId: bot.id, senderName: bot.name, text }
+  }
+
+  // ── settings ──────────────────────────────────────────────────────────────
+
+  /**
+   * Whether the scheduling model arbitrates who speaks.
+   *
+   * The persisted UI toggle wins; otherwise the plugin's static config
+   * decides, defaulting to on.
+   */
+  schedulerEnabled(): boolean {
+    const stored = this.store.table('settings').get(SCHEDULER_ENABLED_KEY)
+    if (stored !== undefined) return stored === '1'
+    return this.config.schedulerEnabled ?? true
+  }
+
+  /** Persist the user's "scheduler decides who speaks" choice. */
+  async setSchedulerEnabled(enabled: boolean): Promise<void> {
+    await this.store.table('settings').put(SCHEDULER_ENABLED_KEY, enabled ? '1' : '0')
+  }
+
+  // ── idle auto-speak ───────────────────────────────────────────────────────
+
+  /**
+   * Start the tick that lets `autoSpeak` bots break a group's silence.
+   *
+   * The timer is unref'd so it can never keep the host process alive on its
+   * own, and the enclosing effect clears it when the plugin is disposed.
+   */
+  private startIdleTrigger(): void {
+    const timer = setInterval(() => {
+      void this.checkIdleGroups().catch((error: unknown) => {
+        this.ctx.logger.warn('chat-group idle tick: %o', error)
+      })
+    }, IDLE_CHECK_INTERVAL_MS)
+    timer.unref?.()
+    this.ctx.effect(() => () => clearInterval(timer), 'chat-group idle trigger')
+  }
+
+  /**
+   * Wake one bot in every group that has been quiet past that bot's idle
+   * window, then hand the conversation to the normal cascade so the other
+   * members can respond.
+   */
+  private async checkIdleGroups(): Promise<void> {
+    const now = Date.now()
+    for (const group of this.list()) {
+      // A cascade in flight is already producing messages; leave it alone.
+      if (this.cascading.has(group.id)) continue
+      // 用户已停止该群：不再主动开口
+      if (this.stopped.has(group.id)) continue
+      const lastAt = this.groupActivity.get(group.id)
+      // A group we have not seen this run: seed the baseline instead of
+      // firing immediately, otherwise every restart would dump an unprompted
+      // message into every group that was idle while the app was closed.
+      if (lastAt === undefined) {
+        this.groupActivity.set(group.id, now)
+        continue
+      }
+      const bot = this.pickIdleSpeaker(group, now, lastAt)
+      if (bot === undefined) continue
+      await traceGroup(`idle: group=${group.id} quiet ${String(Math.round((now - lastAt) / 1000))}s → waking bot=${bot.id}`)
+      await this.runIdleTurn(group, bot)
+    }
+  }
+
+  /**
+   * The member that should break this group's silence, or undefined.
+   *
+   * Picks the most overdue eligible bot (the one past its window by the
+   * largest margin) so a 5-minute bot speaks before a 10-minute one rather
+   * than the group waiting for its slowest member.
+   */
+  private pickIdleSpeaker(group: GroupRecord, now: number, lastAt: number): BotRecord | undefined {
+    const lastIdle = this.lastIdleTurn.get(group.id)
+    let best: { bot: BotRecord; overdueBy: number } | undefined
+    for (const botId of group.memberBotIds) {
+      const bot = this.ctx.chatBots.get(botId)
+      if (bot === undefined) continue
+      // Auto-speak is opt-in; the default is to stay quiet unless addressed.
+      if (bot.trigger.autoSpeak !== true) continue
+      const windowMs = (bot.trigger.idleTriggerMinutes ?? DEFAULT_IDLE_TRIGGER_MINUTES) * 60_000
+      const overdueBy = now - lastAt - windowMs
+      if (overdueBy < 0) continue
+      // Nobody replied to this bot's last unprompted turn — do not let it
+      // keep talking to itself.
+      if (lastIdle !== undefined && lastIdle.botId === bot.id && lastIdle.at >= lastAt) continue
+      if (best === undefined || overdueBy > best.overdueBy) best = { bot, overdueBy }
+    }
+    return best?.bot
+  }
+
+  /**
+   * Run one bot's unprompted turn, then let the cascade carry the thread on.
+   *
+   * The opening turn is not a scheduling decision — the idle timer picked
+   * this bot, not the model — so it runs without the "thinking..." indicator.
+   * Every round after it (who, if anyone, answers) does go through the
+   * scheduler and therefore does show the indicator.
+   */
+  private async runIdleTurn(group: GroupRecord, bot: BotRecord): Promise<void> {
+    this.cascading.add(group.id)
+    try {
+      const spoken = await this.speak(group, bot, 'idle')
+      if (spoken === null) return
+      this.lastIdleTurn.set(group.id, { botId: bot.id, at: Date.now() })
+      const maxRounds = this.config.maxGroupRounds ?? DEFAULT_MAX_GROUP_ROUNDS
+      await this.cascadeRounds(group, spoken, maxRounds, false, new Set())
+    } catch (error: unknown) {
+      this.ctx.logger.warn('chat-group idle turn: %o', error)
+    } finally {
+      this.cascading.delete(group.id)
+      this.broadcastScheduling(group.id, false)
+    }
   }
 
   // ── history ───────────────────────────────────────────────────────────────
@@ -616,6 +1082,31 @@ export class ChatGroup extends Service {
       return text === '' ? {} : JSON.parse(text) as Record<string, unknown>
     }
 
+    // 群聊级设置（不属于某个具体群，单独挂一个 prefix，避免与
+    // `/chatapi/groups/{id}` 的 id 段冲突）
+    this.ctx.webServer.register({
+      kind: 'prefix',
+      path: '/chatapi/group-settings',
+      handler: async (_req, res) => {
+        try {
+          if (_req.method === 'GET') {
+            return json(res, 200, { schedulerEnabled: this.schedulerEnabled() })
+          }
+          if (_req.method === 'PUT' || _req.method === 'POST') {
+            const body = await readBody(_req)
+            if (typeof body.schedulerEnabled !== 'boolean') {
+              return json(res, 400, { error: 'schedulerEnabled must be a boolean' })
+            }
+            await this.setSchedulerEnabled(body.schedulerEnabled)
+            return json(res, 200, { schedulerEnabled: this.schedulerEnabled() })
+          }
+          return json(res, 405, { error: 'method not allowed' })
+        } catch (error: unknown) {
+          return json(res, 500, { error: String(error) })
+        }
+      },
+    })
+
     this.ctx.webServer.register({
       kind: 'prefix',
       path: '/chatapi/groups',
@@ -654,8 +1145,11 @@ export class ChatGroup extends Service {
 
           if (action === '/stop') {
             if (req.method !== 'POST') return json(res, 405, { error: 'method not allowed' })
-            // 取消容器 agent（编排循环）与该群全部成员 bot agent（各自的
-            // 生成 turn），清空后续轮次调度
+            // 用户点了停止：既要中断当前正在生成的成员，也要阻止后续轮次的
+            // 调度——否则取消掉当前 turn 后循环会立刻安排下一位继续说，群聊
+            // 看起来就永远停不下来。用户下一次发言时该标记会被清除。
+            this.stopped.add(groupId)
+            // 取消容器 agent（编排循环）与该群全部成员 bot agent（各自的生成 turn）
             let stopped = false
             const container = this.containers.get(groupId)?.agent
             if (container !== undefined && container.status === 'running') {
@@ -725,7 +1219,8 @@ export class ChatGroup extends Service {
 // ── pure render helpers ──────────────────────────────────────────────────────
 
 /** Render recent group events as the bot-facing relay transcript. */
-function renderGroupContext(session: Session, window: number): string {
+/** Render the recent group transcript as plain `name: text` rows. */
+function renderTranscript(session: Session, window: number): string {
   const rows: string[] = []
   for (const event of session.events) {
     if (event.type === 'group/user-message') {
@@ -734,10 +1229,13 @@ function renderGroupContext(session: Session, window: number): string {
       rows.push(`${event.data.botName}: ${event.data.text}`)
     }
   }
-  const recent = rows.slice(-window)
+  return rows.slice(-window).join('\n')
+}
+
+function renderGroupContext(session: Session, window: number): string {
   return [
     '以下是群里最近的聊天记录（最后一条是最新消息）：',
-    ...recent,
+    renderTranscript(session, window),
     '请以你的身份参与这个群聊。',
   ].join('\n')
 }

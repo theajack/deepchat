@@ -14,6 +14,24 @@ export interface TriggerConfig {
   readonly keywords: readonly string[]
   /** Minimum silence window (seconds) between this bot's group replies. */
   readonly cooldownSeconds: number
+  /**
+   * Whether this bot may speak up on its own in group chats.
+   *
+   * When true the bot breaks the silence itself: once the group has been idle
+   * for {@link idleTriggerMinutes} with nobody talking, it starts a new
+   * thread unprompted. When false it only ever replies when @-mentioned or
+   * when the scheduler picks it in response to someone else's message.
+   * Defaults to false — staying quiet unless asked is the safer default.
+   */
+  readonly autoSpeak?: boolean
+  /**
+   * Minutes of group silence after which an `autoSpeak` bot speaks up.
+   *
+   * Only meaningful when {@link autoSpeak} is true. Defaults to 7 (a value in
+   * the 5–10 range) so freshly created bots break the silence at a natural,
+   * non-synchronised cadence.
+   */
+  readonly idleTriggerMinutes?: number
 }
 
 /** One durable AI-companion record (chat-agent's `ai_bots` successor). */

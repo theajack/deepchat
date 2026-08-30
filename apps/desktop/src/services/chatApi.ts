@@ -7,6 +7,28 @@ export interface MessagePage {
   hasMore: boolean
 }
 
+/** 群聊级设置（不属于单个群，对所有群聊生效） */
+export interface GroupSettings {
+  /** 是否启用发言调度者：由调度模型判断轮到谁发言，以及是否该保持安静 */
+  schedulerEnabled: boolean
+}
+
+/**
+ * 通用处理模型的显式设置与实际生效值。
+ *
+ * 通用处理模型负责「生成人设 / 自我介绍 / 群聊介绍」这类编辑辅助调用，
+ * 与 AI 好友聊天所用的默认模型相互独立，可单独指定为更便宜或更快的模型。
+ */
+export interface GeneralModel {
+  /** 显式设置的模型 id，空串表示未设置 */
+  id: string
+  /** 经回落链后真正生效的模型 id，空串表示无任何可用模型 */
+  effectiveId: string
+}
+
+/** 人设/介绍生成的种类，决定后端选用哪套提示词 */
+export type PersonaKind = 'botPersona' | 'selfIntro' | 'groupIntro'
+
 /** 类型化业务 API 门面：stores 只依赖它，不直接感知传输层（SRP + DIP） */
 export class ChatApi {
   constructor(private t: IpcTransport) {}
@@ -38,6 +60,30 @@ export class ChatApi {
   }
   setDefaultModel(id: string | null): Promise<void> {
     return this.t.request('model.setDefault', { id })
+  }
+  /**
+   * Set (or clear, with null) the general-purpose model used for editor
+   * assists such as persona and introduction generation.
+   */
+  setGeneralModel(id: string | null): Promise<void> {
+    return this.t.request('model.setGeneral', { id })
+  }
+  /**
+   * Read the general-purpose model: `id` is what the user explicitly picked,
+   * `effectiveId` is what actually runs after the fallback chain
+   * (general → default chat model → first model).
+   */
+  getGeneralModel(): Promise<GeneralModel> {
+    return this.t.request('model.getGeneral')
+  }
+
+  /** Read the group-chat-wide settings. */
+  getGroupSettings(): Promise<GroupSettings> {
+    return this.t.request('group.getSettings')
+  }
+  /** Toggle the speaker scheduler on/off. */
+  setGroupSchedulerEnabled(enabled: boolean): Promise<GroupSettings> {
+    return this.t.request('group.setSchedulerEnabled', { schedulerEnabled: enabled })
   }
 
   /** Read one bot's long-term memory document (survives clearing the chat). */

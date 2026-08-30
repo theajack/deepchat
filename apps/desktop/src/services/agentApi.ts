@@ -113,6 +113,9 @@ export const toolList = (botId: string) => transport.request<ToolInfo[]>('tool.l
 export const toolListAll = () => transport.request<ToolMeta[]>('tool.listAll', {})
 export const toolOpenUrl = (url: string) => transport.request<{ ok: boolean; url: string }>('tool.openUrl', { url })
 export const toolOpenDir = (dir: string) => transport.request<{ ok: boolean; dir: string }>('tool.openDir', { dir })
+/** 打开系统目录选择对话框；返回选中的目录，用户取消则返回 null */
+export const pickDir = (defaultPath?: string) =>
+  transport.request<string | null>('misc.pickDir', { defaultPath })
 export const skillList = (workspaceDir?: string, skillDirs?: string[]) =>
   transport.request<SkillListResult>('skill.list', { workspaceDir, skillDirs })
 export const skillFind = (query: string, owner?: string) =>
@@ -142,6 +145,7 @@ export const agentApi = {
   toolListAll,
   toolOpenUrl,
   toolOpenDir,
+  pickDir,
   skillList,
   skillFind,
   skillCreate,

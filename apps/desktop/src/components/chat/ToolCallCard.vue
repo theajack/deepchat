@@ -26,9 +26,9 @@ const userToggled = ref(false);
 // 调试：工具名丢失定位（仅当 window.__TOOL_DEBUG__ 时输出）
 if (typeof window !== 'undefined' && (window as unknown as { __TOOL_DEBUG__?: boolean }).__TOOL_DEBUG__) {
   watch(
-    () => [props.name, props.id, props.status, props.result],
-    ([name, id, status, result]) => {
-      console.log('[ToolCallCard]', { name, id, status, hasResult: result !== undefined && result !== null })
+    () => [props.name, props.status, props.result],
+    ([name, status, result]) => {
+      console.log('[ToolCallCard]', { name, status, hasResult: result !== undefined && result !== null })
     },
     { immediate: true },
   )

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Monitor, Moon, Sun, FolderOpen, ExternalLink, Globe, AppWindow, Palette, Languages } from "lucide-vue-next";
+import { Monitor, Moon, Sun, FolderOpen, ExternalLink, Globe, AppWindow, Palette, Languages, Users } from "lucide-vue-next";
 import { computed, onMounted, ref } from "vue";
 import { useThemeStore, type ThemeMode } from "../../stores/theme";
 import { useLocaleStore } from "../../stores/locale";
@@ -37,6 +37,22 @@ const workspaceDir = ref("");
 const dataDirPaths = ref<Record<string, string>>({});
 const browserPref = ref<BrowserPref>("system");
 
+// 群聊：是否启用发言调度者（默认开启，由后端兜底）
+const schedulerEnabled = ref(true);
+
+async function toggleScheduler(enabled: boolean) {
+  schedulerEnabled.value = enabled;
+  try {
+    const saved = await chatApi.setGroupSchedulerEnabled(enabled);
+    schedulerEnabled.value = saved.schedulerEnabled;
+  } catch (e) {
+    // 写入失败则回滚，避免界面与后端状态不一致
+    schedulerEnabled.value = !enabled;
+    console.error("[general] 保存群聊调度开关失败", e);
+    app.toast(t("common.saveFailed"));
+  }
+}
+
 const browserOptions = computed<{ value: BrowserPref; label: string; desc: string; icon: typeof Globe }[]>(() => [
   { value: "builtin", label: t("browser.builtin"), desc: t("browser.builtinDesc"), icon: AppWindow },
   { value: "system", label: t("browser.system"), desc: t("browser.systemDesc"), icon: Globe },
@@ -65,6 +81,9 @@ onMounted(async () => {
     dataDirPaths.value = Object.fromEntries(dirs.map((d) => [d.name, d.path]));
   } catch { /* ignore */ }
   browserPref.value = getBrowserPref();
+  try {
+    schedulerEnabled.value = (await chatApi.getGroupSettings()).schedulerEnabled;
+  } catch { /* 读取失败保留默认值 */ }
 });
 </script>
 
@@ -142,6 +161,32 @@ onMounted(async () => {
         {{ opt.label }}
       </button>
     </div>
+  </section>
+
+  <section class="rounded-xl border border-line bg-ink-2/40 p-5">
+    <div class="flex items-center gap-2">
+      <Users :size="15" class="text-accent" />
+      <h3 class="text-[13px] font-semibold tracking-wide text-hi">{{ t("general.group") }}</h3>
+    </div>
+    <label class="mt-3 flex cursor-pointer items-start justify-between gap-3 rounded-lg border border-line bg-ink-1/60 px-3 py-2.5 transition-colors hover:bg-ink-3">
+      <span class="min-w-0">
+        <span class="block text-[12px] text-mid">{{ t("general.groupScheduler") }}</span>
+        <span class="mt-0.5 block text-[11px] leading-relaxed text-lo">{{ t("general.groupSchedulerDesc") }}</span>
+      </span>
+      <button
+        type="button"
+        role="switch"
+        :aria-checked="schedulerEnabled"
+        class="relative mt-0.5 h-5 w-9 shrink-0 cursor-pointer rounded-full transition-colors"
+        :class="schedulerEnabled ? 'bg-accent' : 'bg-ink-3'"
+        @click="toggleScheduler(!schedulerEnabled)"
+      >
+        <span
+          class="absolute top-0.5 h-4 w-4 rounded-full bg-white transition-all"
+          :class="schedulerEnabled ? 'left-[18px]' : 'left-[2px]'"
+        />
+      </button>
+    </label>
   </section>
 
   <section class="rounded-xl border border-line bg-ink-2/40 p-5">

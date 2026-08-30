@@ -32,7 +32,7 @@ import type {} from '@deepseek-ai/dsh-tools'
 // Side-effect type import: pulls in the `settings`/`credentials` augmentations.
 import type {} from '@deepseek-ai/dsh-settings'
 import type {} from '@deepseek-ai/dsh-credentials'
-import { DefaultModelStore, type ModelRecord, mirrorDeepSeekCredential, modelRecordSchema, ModelStore, removeRoute, routeIdFor, syncRoute } from './models.ts'
+import { ModelPreferenceStore, DEFAULT_MODEL_KEY, GROUP_JUDGE_MODEL_KEY, type ModelRecord, mirrorDeepSeekCredential, modelRecordSchema, ModelStore, removeRoute, routeIdFor, syncRoute } from './models.ts'
 import { formatInstalls, installGithubSkill, searchSkillsApi } from './skills-remote.ts'
 import { buildBotAgentSetup, resolveEnabledSkills } from './agent-setup.ts'
 import { LlmTraceRecorder } from './llm-trace.ts'
@@ -48,7 +48,11 @@ import {
 
 export { extractTranscript, memoryUpdatedAt, readMemory, writeMemory } from './memory.ts'
 export type { MemorySourceRow } from './memory.ts'
+export { generatePersonaText } from './persona.ts'
+export type { PersonaGenerateOptions, PersonaKind } from './persona.ts'
+export { routeIdFor, ModelPreferenceStore, DEFAULT_MODEL_KEY, GROUP_JUDGE_MODEL_KEY } from './models.ts'
 import { configureDebugLog, debugLog, isDebugLogEnabled, tailDebugLog, DEBUG_LOG_PATH } from './debug-log.ts'
+import { generatePersonaText, type PersonaKind } from './persona.ts'
 import { pageRows, renderPrivateHistory, translateSessionEvent } from './bridge.ts'
 import { defineDomain, domainTable } from '@deepseek-ai/dsh-storage-domain'
 import type { Domain } from '@deepseek-ai/dsh-storage-domain'
@@ -70,8 +74,14 @@ export const name = 'chat-bots'
  * `settings`/`credentials` are intentionally absent: declaring them deadlocks
  * the boot order (they activate after the chat plugins), so they are requested
  * dynamically via `ctx.inject` in the constructor instead.
+ *
+ * `fs` backs the scoped `read_document` tool, which resolves and reads
+ * attachments through the filesystem service rather than `node:fs` so the
+ * sandbox and observation policy apply. It must be declared here (and in
+ * chat-group, which reuses `buildBotAgentSetup`) or the tool throws
+ * "cannot get property \"fs\" without inject" the first time it is called.
  */
-export const inject = ['agents', 'llm', 'tools', 'skills', 'storageDomain', 'webServer', 'attachments']
+export const inject = ['agents', 'llm', 'tools', 'skills', 'storageDomain', 'webServer', 'attachments', 'fs']
 
 /** Plugin config (all deployment-tunable values carry defaults). */
 export interface Config {
@@ -167,7 +177,10 @@ export class ChatBots extends Service {
   private models: ModelStore | undefined
 
   /** The user's default-model choice, backing background work (memory). */
-  private defaultModel: DefaultModelStore | undefined
+  private defaultModel: ModelPreferenceStore | undefined
+
+  /** The model arbitrating who speaks next in group chats. */
+  private groupJudge: ModelPreferenceStore | undefined
 
   /** Live agent handles by bot id; disposal removes the entry. */
   private readonly handles = new Map<string, AgentHandle>()
@@ -217,7 +230,8 @@ export class ChatBots extends Service {
       this.domain = undefined
     }, 'chat-bots domain')
     this.models = new ModelStore(this.domain)
-    this.defaultModel = new DefaultModelStore(this.domain, this.models)
+    this.defaultModel = new ModelPreferenceStore(this.domain, this.models, DEFAULT_MODEL_KEY)
+    this.groupJudge = new ModelPreferenceStore(this.domain, this.models, GROUP_JUDGE_MODEL_KEY)
     // 一次性回填：为缺少工作目录的旧好友记录补建 workspace/agents/{id}
     const bots = this.domain.table('bots')
     for (const [id, bot] of bots.entries()) {
@@ -312,6 +326,84 @@ export class ChatBots extends Service {
     })
   }
 
+  /**
+   * `POST /chatapi/persona/generate` — stream one auxiliary text
+   * (bot persona / self intro / group intro) back as SSE deltas.
+   *
+   * Streaming (rather than a single JSON response) keeps the editor field
+   * filling in live, exactly like the old CLI's `persona.stream` events did.
+   * The model is the **general-purpose model** unless the caller pins one:
+   * these are editor-assistant calls, unrelated to whichever model the bot
+   * itself chats with.
+   */
+  private registerPersonaEndpoint(): void {
+    this.ctx.webServer.register({
+      kind: 'prefix',
+      path: '/chatapi/persona',
+      handler: async (req, res) => {
+        const fail = (status: number, error: string): void => {
+          res.writeHead(status, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ error }))
+        }
+        if (req.method !== 'POST') return fail(405, 'method not allowed')
+
+        const chunks: Buffer[] = []
+        for await (const chunk of req) chunks.push(chunk as Buffer)
+        let body: Record<string, unknown> = {}
+        try {
+          const text = Buffer.concat(chunks).toString('utf8')
+          if (text !== '') body = JSON.parse(text) as Record<string, unknown>
+        } catch {
+          return fail(400, 'invalid JSON body')
+        }
+
+        const kind = body.kind
+        if (kind !== 'botPersona' && kind !== 'selfIntro' && kind !== 'groupIntro') {
+          return fail(400, 'kind must be botPersona | selfIntro | groupIntro')
+        }
+        const name = typeof body.name === 'string' ? body.name.trim() : ''
+        if (name === '') return fail(400, 'name 不能为空')
+
+        // 模型：调用方指定优先，否则用设置里的通用处理模型（群聊调度偏好）
+        const models = this.models
+        const requestedId = typeof body.modelId === 'string' && body.modelId !== '' ? body.modelId : undefined
+        const record = (requestedId === undefined ? undefined : models?.get(requestedId)) ?? this.groupJudgeModel()
+        if (record === undefined) return fail(400, '还没有可用模型，请先在设置里添加模型')
+
+        res.writeHead(200, {
+          'content-type': 'text/event-stream',
+          'cache-control': 'no-cache',
+          connection: 'keep-alive',
+        })
+        const send = (payload: unknown): void => {
+          res.write(`data: ${JSON.stringify(payload)}\n\n`)
+        }
+
+        const memberNames = Array.isArray(body.memberNames)
+          ? body.memberNames.filter((item): item is string => typeof item === 'string')
+          : []
+
+        try {
+          const content = await generatePersonaText({
+            ctx: this.ctx,
+            kind: kind as PersonaKind,
+            provider: routeIdFor(record.id),
+            model: record.modelName,
+            name,
+            partial: typeof body.partial === 'string' ? body.partial : '',
+            memberNames,
+            onDelta: (delta) => { send({ delta }) },
+          })
+          send({ done: true, content })
+        } catch (error: unknown) {
+          this.ctx.logger.warn('chat-bots: persona generation failed: %o', error)
+          send({ error: error instanceof Error ? error.message : String(error) })
+        }
+        res.end()
+      },
+    })
+  }
+
   /** Every bot record, newest first. */
   list(): BotRecord[] {
     return [...this.store.table('bots').entries()]
@@ -387,6 +479,11 @@ export class ChatBots extends Service {
       trigger: sanitized.trigger ?? current.trigger,
       updatedAt: Date.now(),
     }
+    // 用户自定义工作目录必须真实存在：agent 的沙箱 cwd、文件工具与长期记忆
+    // 都以它为根，指向不存在的路径会让好友一开口就报错。
+    if (next.workspaceDir !== undefined && next.workspaceDir !== current.workspaceDir) {
+      await mkdir(next.workspaceDir, { recursive: true })
+    }
     await this.store.table('bots').put(id, next)
 
     const modelChanged = sanitized.provider !== undefined || sanitized.model !== undefined
@@ -397,9 +494,11 @@ export class ChatBots extends Service {
     // 工具/技能/MCP 白名单全部在 agent setup 中生效，变化必须重建 agent
     const capabilitiesChanged = (['enabledTools', 'enabledSkills', 'enabledMcpServers'] as const)
       .some(key => sanitized[key] !== undefined && JSON.stringify(sanitized[key]) !== JSON.stringify(current[key]))
+    // 工作目录是 agent 的 cwd，写死在会话 meta 里，改了必须重建才生效
+    const workspaceChanged = sanitized.workspaceDir !== undefined && sanitized.workspaceDir !== current.workspaceDir
 
     if (this.handles.has(id)) {
-      if (modelChanged || agentToggleChanged || capabilitiesChanged) {
+      if (modelChanged || agentToggleChanged || capabilitiesChanged || workspaceChanged) {
         // Model/provider live in AgentOptions, fixed at creation: rebuild on
         // the same durable session identity (resume keeps the bot's memory).
         await this.rebuildAgent(id)
@@ -589,6 +688,32 @@ export class ChatBots extends Service {
     }
   }
 
+  /**
+   * The model arbitrating who speaks next in a group chat.
+   *
+   * Three-step fallback: an explicit scheduling model → the default model →
+   * the newest record. So scheduling works out of the box; the dedicated
+   * setting only exists to override it with something cheaper or smarter.
+   *
+   * Undefined only when no model is configured at all, in which case the group
+   * plugin falls back to its rule engine.
+   */
+  groupJudgeModel(): ModelRecord | undefined {
+    return this.groupJudge?.resolveExplicit() ?? this.defaultModel?.resolve()
+  }
+
+  /**
+   * What the UI needs to render the scheduling marker: which model is
+   * explicitly set, and which one actually takes effect (they differ whenever
+   * the fallback is in play).
+   */
+  groupJudgeModelIds(): { id: string | null; effectiveId: string | null } {
+    return {
+      id: this.groupJudge?.id() ?? null,
+      effectiveId: this.groupJudgeModel()?.id ?? null,
+    }
+  }
+
 
 
   /** Rebuild the live agent for a bot on its existing durable session. */
@@ -608,6 +733,7 @@ export class ChatBots extends Service {
   /** The `/chatapi/bots` HTTP surface. */
   private registerHttp(): void {
     this.registerSseEndpoint()
+    this.registerPersonaEndpoint()
 
     // ── 本地头像文件读取（settings editor 上传后的展示）──
     this.ctx.webServer.register({
@@ -812,13 +938,19 @@ export class ChatBots extends Service {
           if (match === null) return json(res, 404, { error: 'not found' })
           const modelId = match[1]
 
-          // 默认模型（后台任务如记忆沉淀用它）。model id 恒为 `model-<uuid>`，
-          // 永不等于 "default"，故与 /:id 路由无冲突。
-          if (modelId === 'default') {
-            const defaults = this.defaultModel
-            if (defaults === undefined) return json(res, 503, { error: 'default model store not ready' })
+          // 模型偏好（默认模型 / 群聊调度模型）。model id 恒为 `model-<uuid>`，
+          // 永不等于这两个保留字，故与 /:id 路由无冲突。
+          const preference = modelId === 'group-judge'
+            ? this.groupJudge
+            : modelId === 'default'
+              ? this.defaultModel
+              : undefined
+          if (preference !== undefined) {
             if (req.method === 'GET') {
-              return json(res, 200, { id: defaults.id() ?? null })
+              // 群聊调度会回落到默认模型再回落到首个模型，UI 需要看到真正生效的那个
+              return modelId === 'group-judge'
+                ? json(res, 200, this.groupJudgeModelIds())
+                : json(res, 200, { id: preference.id() ?? null, effectiveId: preference.id() ?? null })
             }
             if (req.method === 'POST') {
               const body = await readBody(req)
@@ -826,9 +958,11 @@ export class ChatBots extends Service {
               if (id !== '' && models.get(id) === undefined) {
                 return json(res, 404, { error: `model "${id}" not found` })
               }
-              if (id === '') await defaults.clear()
-              else await defaults.set(id)
-              return json(res, 200, { id: defaults.id() ?? null })
+              if (id === '') await preference.clear()
+              else await preference.set(id)
+              return modelId === 'group-judge'
+                ? json(res, 200, this.groupJudgeModelIds())
+                : json(res, 200, { id: preference.id() ?? null, effectiveId: preference.id() ?? null })
             }
             return json(res, 405, { error: 'method not allowed' })
           }

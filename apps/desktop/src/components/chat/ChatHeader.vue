@@ -5,13 +5,14 @@ import { useBotsStore } from "../../stores/bots";
 import { useConversationsStore } from "../../stores/conversations";
 import { useMessagesStore } from "../../stores/messages";
 import { useModelsStore } from "../../stores/models";
-import { MoreVertical, Pencil, Trash2, Users, Cpu } from "lucide-vue-next";
+import { Pencil, Trash2, Users, Cpu, MessageSquareText } from "lucide-vue-next";
 import Avatar from "../common/Avatar.vue";
 import HoverTip from "../common/HoverTip.vue";
 import GroupAvatar from "../contacts/GroupAvatar.vue";
 import BotAgentBadge from "../contacts/BotAgentBadge.vue";
 import ConfirmModal from "../common/ConfirmModal.vue";
 import Drawer from "../common/Drawer.vue";
+import { openLlmTraceWindow } from "../../utils/llmTrace";
 import type { Bot } from "../../types";
 import { t } from "../../i18n";
 
@@ -156,6 +157,14 @@ const subText = computed(() => {
         @click="onEdit"
       >
         <Pencil :size="16" :stroke-width="2" />
+      </button>
+      <!-- 对话过程与历史：复用调试面板的「对话信息」窗口 -->
+      <button
+        class="flex h-8 w-8 items-center justify-center rounded-lg text-mid transition-colors hover:bg-ink-3 hover:text-hi"
+        :title="t('chat.llmTrace')"
+        @click="openLlmTraceWindow"
+      >
+        <MessageSquareText :size="16" :stroke-width="2" />
       </button>
       <!-- <button
         :disabled="botDeleted"

@@ -51,6 +51,8 @@ export const useMessagesStore = defineStore('messages', () => {
   const hasMoreByConv = ref<Record<string, boolean>>({})
   /** 是否正在向上翻页（并发防护） */
   const loadingMore = ref(false)
+  /** 群聊正在决策由谁发言（conversationId → 是否决策中） */
+  const scheduling = ref<Record<string, boolean>>({})
   /** 定位请求：搜索弹窗点击「定位」后，MessageList 滚动到该消息；nonce 用于重复定位同一条消息 */
   const locate = ref<{ conversationId: string; messageId: string; nonce: number } | null>(null)
 
@@ -260,6 +262,7 @@ export const useMessagesStore = defineStore('messages', () => {
           cleanupDrafts(c.conversationId)
           typing.value = Object.fromEntries(
             Object.entries(typing.value).filter(([key]) => !key.startsWith(`${c.conversationId}:`)))
+          scheduling.value = omitKey(scheduling.value, c.conversationId)
           // 新 session 的 draftId（m-p1…）会与旧 run 碰撞，直接整体清空；
           // 其他会话的记录在切换/load 时会按历史重建
           toolCalls.value = {}
@@ -489,6 +492,16 @@ export const useMessagesStore = defineStore('messages', () => {
           }
           break
         }
+        case 'group.scheduling': {
+          // 群聊决策中：显示"成员正在思考"，决策结束立即关闭
+          const f = frame.data as { conversationId: string; active: boolean }
+          if (f.active) {
+            scheduling.value = { ...scheduling.value, [f.conversationId]: true }
+          } else {
+            scheduling.value = omitKey(scheduling.value, f.conversationId)
+          }
+          break
+        }
         case 'bot.typing': {
           const f = frame.data as TypingFrame
           const key = `${f.conversationId}:${f.botId}`
@@ -549,6 +562,6 @@ export const useMessagesStore = defineStore('messages', () => {
   return {
     byConv, streams, typing, toolCalls, getToolCalls, getSegments,
     load, loadMore, send, stopGeneration, bindEvents, cleanupDrafts, clearLocal,
-    locate, requestLocate, hasMoreByConv, loadingMore,
+    locate, requestLocate, hasMoreByConv, loadingMore, scheduling,
   }
 })

@@ -1,4 +1,5 @@
 import { t } from '../i18n'
+import type { TriggerConfig } from '../types'
 import { dshBaseUrl, dshChatEvents, dshEvents, dshGet, dshSend } from './transport/dsh'
 
 /** CLI 事件帧 */
@@ -23,6 +24,11 @@ interface DshTrigger {
   activeRate: number
   keywords: string[]
   cooldownSeconds: number
+  /** 群聊空闲多久后主动开口（分钟）；仅 autoSpeak 为 true 时生效 */
+  idleTriggerMinutes?: number
+  /** 未设置 = 不主动发言（缺省为 false，主动发言是显式选择） */
+  autoSpeak?: boolean
+  [key: string]: unknown
 }
 
 interface DshBot {
@@ -99,20 +105,27 @@ function toFrontAvatarUrl(raw: string | null | undefined): string | null {
   return raw
 }
 
-function toFrontTrigger(trigger: DshTrigger | undefined): { active_rate: number; keywords: string[]; cooldown_seconds: number } {
+function toFrontTrigger(trigger: DshTrigger | undefined): TriggerConfig {
   return {
-    active_rate: trigger?.activeRate ?? 0.3,
-    keywords: trigger?.keywords ?? [],
-    cooldown_seconds: trigger?.cooldownSeconds ?? 60,
+    // 严格 === true：缺失一律视为关闭，主动发言是显式选择。
+    auto_speak: trigger?.autoSpeak === true,
+    // 7 与后端兜底值一致（5–10 区间的中位）；有配置时以配置为准。
+    idle_trigger_minutes: trigger?.idleTriggerMinutes ?? 7,
   }
 }
 
 function fromFrontTrigger(trigger: Record<string, unknown> | undefined): DshTrigger | undefined {
   if (trigger === undefined) return undefined
+  const minutes = Number(trigger.idle_trigger_minutes)
   return {
-    activeRate: Number(trigger.active_rate ?? 0.3),
-    keywords: Array.isArray(trigger.keywords) ? trigger.keywords.map(String) : [],
-    cooldownSeconds: Number(trigger.cooldown_seconds ?? 60),
+    // 概率与关键词已不再由界面暴露，但后端结构仍要求它们存在，保留默认值。
+    // 冷却归零：它会掐断成员之间的一来一回（说完一轮就集体静音），
+    // 而界面上已经没有入口让用户调它了。
+    activeRate: 0.3,
+    keywords: [],
+    cooldownSeconds: 0,
+    autoSpeak: trigger.auto_speak === true,
+    ...(Number.isFinite(minutes) && minutes > 0 ? { idleTriggerMinutes: minutes } : {}),
   }
 }
 
@@ -150,6 +163,13 @@ function fromFrontBotInput(input: Record<string, unknown>): Record<string, unkno
   // data:image/png;base64 是本地选择上传；后端会自动判断并写入 workspace/agents/<botId>/）
   const avatarRaw = input.avatar == null ? undefined : String(input.avatar)
   const isDataUrl = typeof avatarRaw === 'string' && avatarRaw.startsWith('data:image/')
+  // 工作目录：留空沿用后端默认（workspace/agents/<botId>），填写则以用户
+  // 指定目录为准（后端会创建它，并作为该好友文件操作与记忆的沙箱根目录）。
+  const workspaceDirRaw = input.workspace_dir
+  const workspaceDir =
+    typeof workspaceDirRaw === 'string' && workspaceDirRaw.trim() !== ''
+      ? workspaceDirRaw.trim()
+      : undefined
   return {
     name: String(input.name ?? ''),
     ...(isDataUrl ? { avatarData: avatarRaw } : { avatar: avatarRaw }),
@@ -159,6 +179,7 @@ function fromFrontBotInput(input: Record<string, unknown>): Record<string, unkno
     provider: input.model_provider == null ? undefined : String(input.model_provider),
     model: input.model_name == null ? undefined : String(input.model_name),
     trigger: fromFrontTrigger(input.trigger_config as Record<string, unknown> | undefined),
+    ...(workspaceDir !== undefined ? { workspaceDir } : {}),
     ...(enabledTools !== undefined ? { enabledTools } : {}),
     ...(enabledSkills !== undefined ? { enabledSkills } : {}),
     ...(enabledMcpServers !== undefined ? { enabledMcpServers } : {}),
@@ -218,6 +239,19 @@ export class DshTransport implements IpcTransport {
       return JSON.parse(localStorage.getItem('deepchat:settings') ?? '{}') as Record<string, string>
     } catch {
       return {}
+    }
+  }
+
+  /**
+   * Read the general-purpose model (explicit pick + effective model) from the
+   * host. Backed by the same preference the group scheduler uses.
+   */
+  private async fetchGeneralModel(): Promise<{ id: string; effectiveId: string }> {
+    try {
+      const res = await dshGet<{ id: string | null; effectiveId: string | null }>('/chatapi/models/group-judge')
+      return { id: res.id ?? '', effectiveId: res.effectiveId ?? '' }
+    } catch {
+      return { id: '', effectiveId: '' }
     }
   }
 
@@ -511,6 +545,21 @@ export class DshTransport implements IpcTransport {
       void this.syncDefaultModel(id)
       return undefined as T
     }
+    if (method === 'model.setGeneral') {
+      // 通用处理模型只在后端生效，不同步 localStorage
+      const raw = params.id
+      const id = raw === null || raw === undefined ? '' : String(raw)
+      await dshSend('POST', '/chatapi/models/group-judge', { id })
+      return undefined as T
+    }
+    if (method === 'model.getGeneral') return await this.fetchGeneralModel() as T
+    if (method === 'group.getSettings') {
+      return await dshGet<T>('/chatapi/group-settings')
+    }
+    if (method === 'group.setSchedulerEnabled') {
+      const schedulerEnabled = params.schedulerEnabled === true
+      return await dshSend<T>('PUT', '/chatapi/group-settings', { schedulerEnabled })
+    }
     if (method === 'bot.getMemory') {
       return await dshGet<T>(`/chatapi/bots/${encodeURIComponent(String(params.id))}/memory`)
     }
@@ -548,6 +597,20 @@ export class DshTransport implements IpcTransport {
         action: 'debug-log-tail',
         ...(typeof params.lines === 'number' ? { lines: params.lines } : {}),
       })
+    }
+    if (method === 'misc.pickDir') {
+      // 打开系统原生目录选择对话框。这纯粹是桌面端能力，不涉及 dsh 宿主，
+      // 因此不走 transport 而是直接调 Tauri 插件。
+      const { open } = await import('@tauri-apps/plugin-dialog')
+      const selected = await open({
+        directory: true,
+        multiple: false,
+        ...(typeof params.defaultPath === 'string' && params.defaultPath !== ''
+          ? { defaultPath: params.defaultPath }
+          : {}),
+      })
+      // 用户取消时为 null；单选模式下返回值是 string
+      return (typeof selected === 'string' ? selected : null) as T
     }
 
     // ── 技能：dsh skill 注册表（bundled + $DSH_HOME/skills + project）──
@@ -590,10 +653,8 @@ export class DshTransport implements IpcTransport {
       return await dshSend<T>('DELETE', '/chatapi/llm-trace')
     }
 
-    // ── persona 生成：M4（chat-persona-gen 插件）──
-    if (method === 'persona.generate' || method === 'persona.generateSelfIntro') {
-      throw new Error(NOT_MIGRATED)
-    }
+    // persona 生成走 chatApi 的 SSE 流式接口（POST /chatapi/persona/generate），
+    // 不经过这里的请求/响应信封 —— 它需要逐 delta 回调而非一次性结果。
     if (method.startsWith('model.')) throw new Error(NOT_MIGRATED)
     if (method.startsWith('mcp.')) throw new Error(NOT_MIGRATED)
 

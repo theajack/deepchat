@@ -5,9 +5,9 @@ import { useMessagesStore } from "../../stores/messages";
 import { useBotsStore } from "../../stores/bots";
 import { useSelfStore } from "../../stores/self";
 import { formatSeparator } from "../../utils/display";
-import { Loader2 } from "lucide-vue-next";
 import { t } from "../../i18n";
 import MessageBubble, { type BubbleModel } from "./MessageBubble.vue";
+import Spinner from "../common/Spinner.vue";
 // import ContextMenu, { type ContextMenuState } from "../common/ContextMenu.vue";
 // import { t } from "../../i18n";
 
@@ -15,7 +15,11 @@ const TIME_GAP = 5 * 60 * 1000;
 /** 距顶部小于此值即触发向上翻页（px） */
 const PRELOAD_OFFSET = 120;
 
-type Row = { type: "time"; key: string; text: string } | { type: "msg"; key: string; model: BubbleModel };
+type Row =
+  | { type: "time"; key: string; text: string }
+  | { type: "msg"; key: string; model: BubbleModel }
+  /** 群聊正在决策由哪个成员发言 */
+  | { type: "scheduling"; key: string };
 
 const conversations = useConversationsStore();
 const messages = useMessagesStore();
@@ -114,20 +118,23 @@ const rows = computed<Row[]>(() => {
     if (!prev || msg.created_at - prev.created_at > TIME_GAP) {
       result.push({ type: "time", key: `t-${msg.id}`, text: formatSeparator(msg.created_at) });
     }
-    const samePrev = prev && prev.sender_id === msg.sender_id && msg.created_at - prev.created_at <= TIME_GAP;
+    // 用户消息（isSelf）始终显示头像，避免连续发言时气泡对不齐；
+    // AI 消息仅在间隔 > TIME_GAP 时显示头像以节省空间
+    const isUserMsg = msg.is_self === 1;
+    const samePrev = !isUserMsg && prev && prev.sender_id === msg.sender_id && msg.created_at - prev.created_at <= TIME_GAP;
     result.push({
       type: "msg",
       key: msg.id,
       model: {
         key: msg.id,
-        isSelf: msg.is_self === 1,
+        isSelf: isUserMsg,
         senderName: msg.sender_name,
-        avatar: msg.is_self === 1 ? null : avatarOf(msg.sender_id),
-        selfAvatar: msg.is_self === 1 ? selfStore.avatar : null,
+        avatar: isUserMsg ? null : avatarOf(msg.sender_id),
+        selfAvatar: isUserMsg ? selfStore.avatar : null,
         content: msg.content,
         segments: msg.segments,
         time: msg.created_at,
-        showAvatar: !samePrev,
+        showAvatar: isUserMsg || !samePrev,
         showSender: !samePrev,
         animate: i === list.length - 1,
         promptTokens: msg.prompt_tokens ?? 0,
@@ -177,6 +184,11 @@ const rows = computed<Row[]>(() => {
     result.push({ type: "msg", key: "typing", model: { key: "typing", isSelf: false, senderName: typingNames[0], avatar: typingAvatar, content: "", time: null, showAvatar: true, showSender: isGroup, streaming: true } });
   }
 
+  // 群聊决策中：还没有任何成员开口前，显示"成员正在思考"
+  if (messages.scheduling[convId]) {
+    result.push({ type: "scheduling", key: "scheduling" });
+  }
+
   return result;
 });
 
@@ -214,7 +226,7 @@ watch(
   <div ref="bodyRef" class="overscroll-contain flex flex-1 flex-col overflow-y-auto py-2.5 pb-5">
     <!-- 向上翻页：加载更早的 50 条历史 -->
     <div v-if="messages.loadingMore" class="flex items-center justify-center gap-2 py-2 text-[11px] text-lo">
-      <Loader2 :size="13" class="animate-spin text-accent" /> {{ t("common.loading") }}
+      <Spinner :size="13" class="text-accent" /> {{ t("common.loading") }}
     </div>
     <div v-else-if="conv && messages.hasMoreByConv[conv.id]" class="py-2 text-center text-[11px] text-lo/70">
       {{ t("chat.scrollUpForMore") }}
@@ -226,8 +238,16 @@ watch(
         <span class="font-num text-[10px] tracking-widest text-lo">{{ row.text }}</span>
         <span class="h-px w-10 bg-gradient-to-l from-transparent to-line-strong" />
       </div>
+      <!-- 群聊决策中：居中浅色提示 -->
+      <div
+        v-else-if="row.type === 'scheduling'"
+        class="flex items-center justify-center gap-2 py-3 text-[11px] text-lo/60"
+      >
+        <Spinner :size="12" class="text-lo/50" />
+        <span>{{ t("chat.groupScheduling") }}</span>
+      </div>
       <MessageBubble
-        v-else
+        v-else-if="row.type === 'msg'"
         :item="row.model"
         :is-group="conv?.type === 'group'"
         class="my-1"

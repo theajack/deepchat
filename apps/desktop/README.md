@@ -1,4 +1,4 @@
-# ChatAgent Desktop（dsh 底座版）
+# DeepChat Desktop（dsh 底座版）
 
 原 chat-agent `app/`（Tauri 2 + Vue 3 + Pinia + Tailwind 4）平移而来，
 后端从「spawn `chat-agent serve` 子进程 + stdin/stdout JSON Lines IPC」
@@ -21,7 +21,7 @@ dsh host (127.0.0.1:3180, --profile chat-agent)
 - `src/services/ipc.ts`：`DshTransport` 实现 `IpcTransport` 接口，把旧方法名
   （`bot.list` / `message.send` …）映射到新端点，stores 与视图层不改
 - `src-tauri/src/lib.rs`：spawn dsh（dev：`node apps/cli/lib/bin.js --profile chat-agent`；
-  可用 `CHAT_AGENT_DSH_CMD` 覆盖）、端口就绪探测（`dsh.ready` 事件）、保留浏览器 Tab 控制
+  可用 `DEEPCHAT_DSH_CMD` 覆盖）、端口就绪探测（`dsh.ready` 事件）、保留浏览器 Tab 控制
 
 ## 开发
 
@@ -54,7 +54,7 @@ curl http://127.0.0.1:3180/chatapi/bots
 ```
 
 环境变量：
-- `CHAT_AGENT_DSH_CMD`：完整启动命令覆盖（如 `"node /abs/path/bin.js"`）
+- `DEEPCHAT_DSH_CMD`：完整启动命令覆盖（如 `"node /abs/path/bin.js"`）
 - `VITE_DSH_BASE` / `window.__DSH_BASE__`：dsh host 地址（默认 `http://127.0.0.1:3180`）
 
 ## 迁移状态（对照 plan/dsh-migration.md 里程碑）

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
-import { Loader2, Pin, Plus, Search, UserX, Users } from "lucide-vue-next";
+import { Pin, Plus, Search, UserX, Users } from "lucide-vue-next";
 import { useAppStore } from "../../stores/app";
 import { useBotsStore } from "../../stores/bots";
 import { useConversationsStore } from "../../stores/conversations";
@@ -9,6 +9,7 @@ import { useIncrementalList } from "../../composables/useIncrementalList";
 import { formatListTime } from "../../utils/display";
 import Avatar from "../common/Avatar.vue";
 import ConfirmModal from "../common/ConfirmModal.vue";
+import Spinner from "../common/Spinner.vue";
 import ContextMenu, { type ContextMenuState } from "../common/ContextMenu.vue";
 import GroupAvatar from "../contacts/GroupAvatar.vue";
 import BotAgentBadge from "../contacts/BotAgentBadge.vue";
@@ -196,7 +197,7 @@ watch(
     <div class="overscroll-contain flex-1 overflow-y-auto pb-2.5" @scroll="list.onScroll">
       <!-- 会话列表加载中 -->
       <div v-if="conversations.loading" class="flex items-center justify-center gap-2 py-10 text-xs text-lo">
-        <Loader2 :size="14" class="animate-spin text-accent" /> {{ t("common.loading") }}
+        <Spinner :size="14" class="text-accent" /> {{ t("common.loading") }}
       </div>
       <div v-else-if="filtered.length === 0" class="px-4 py-10 text-center text-xs text-lo">
         {{ conversations.chatList.length === 0 ? t("conv.empty") : t("conv.noMatch") }}

@@ -1,10 +1,10 @@
 <script setup lang="ts">
-import { Pencil, Trash2, Plus, Star } from "lucide-vue-next";
+import { Pencil, Trash2, Plus, Star, MessagesSquare } from "lucide-vue-next";
 import { computed, onMounted, ref, watch } from "vue";
 import { useModelsStore } from "../../stores/models";
 import { useAppStore } from "../../stores/app";
 import { useSettingsStore } from "../../stores/settings";
-import { chatApi } from "../../services/chatApi";
+import { chatApi, type GroupJudgeModel } from "../../services/chatApi";
 import ConfirmDialog from "../../utils/ConfirmDialog.vue";
 import type { ModelConfig } from "../../types";
 import { t } from "../../i18n";
@@ -16,6 +16,27 @@ const settings = useSettingsStore();
 const confirmDialog = ref<InstanceType<typeof ConfirmDialog> | null>(null);
 
 const defaultId = computed(() => settings.values["default_model_id"] ?? "");
+/**
+ * 群聊调度模型：决定群里轮到谁发言。
+ *
+ * 存在后端而非 localStorage，所以不能用 settings.values 读，单独拉取。
+ * 未显式设置时会依次回落到默认模型、列表首个模型，因此区分两个值：
+ * explicitId 用于判断点击是「设置」还是「取消」，effectiveId 用于展示标记。
+ */
+const groupJudge = ref<GroupJudgeModel>({ id: "", effectiveId: "" });
+
+async function loadGroupJudge() {
+  try {
+    groupJudge.value = await chatApi.getGroupJudgeModel();
+  } catch {
+    groupJudge.value = { id: "", effectiveId: "" };
+  }
+}
+
+/** 生效的调度模型（可能来自回落） */
+const effectiveJudgeId = computed(() => groupJudge.value.effectiveId);
+/** 是否显式指定过（决定点击行为） */
+const isExplicitJudge = (m: ModelConfig) => groupJudge.value.id !== "" && groupJudge.value.id === m.id;
 
 defineProps<{ editingId: string | null }>();
 const emit = defineEmits<{ (e: "add"): void; (e: "edit", id: string): void }>();
@@ -46,6 +67,7 @@ function providerLabel(m: ModelConfig): string {
 onMounted(async () => {
   if (!models.loaded) await models.load();
   await settings.load();
+  await loadGroupJudge();
 });
 
 // 模型增删会改变默认模型归属，刷新设置以同步默认标记
@@ -53,6 +75,7 @@ watch(
   () => models.items.length,
   async () => {
     await settings.load();
+    await loadGroupJudge();
   },
 );
 
@@ -60,7 +83,20 @@ async function setDefault(m: ModelConfig) {
   try {
     await chatApi.setDefaultModel(m.id);
     await settings.load();
+    // 群聊调度会回落到默认模型，默认模型变了生效值可能跟着变
+    await loadGroupJudge();
     app.toast(t("model.setDefault", { name: m.name }));
+  } catch (e) {
+    app.toast(e instanceof Error ? e.message : String(e));
+  }
+}
+
+async function setGroupJudge(m: ModelConfig) {
+  try {
+    // 只在已显式指定该模型时才是「取消」，否则是「设置」
+    await chatApi.setGroupJudgeModel(isExplicitJudge(m) ? null : m.id);
+    await loadGroupJudge();
+    app.toast(isExplicitJudge(m) ? t("model.clearedGroupJudge") : t("model.setGroupJudge", { name: m.name }));
   } catch (e) {
     app.toast(e instanceof Error ? e.message : String(e));
   }
@@ -77,8 +113,11 @@ async function remove(m: ModelConfig) {
   if (!ok) return;
   try {
     const wasDefault = defaultId.value === m.id;
+    const wasJudge = groupJudge.value.id !== "" || groupJudge.value.effectiveId !== "";
     await models.remove(m.id);
     if (wasDefault) await settings.load();
+    // 删模型会改变回落链的落点
+    if (wasJudge) await loadGroupJudge();
     app.toast(t("model.deleted"));
   } catch (e) {
     app.toast(e instanceof Error ? e.message : String(e));
@@ -117,6 +156,12 @@ async function remove(m: ModelConfig) {
             <span class="truncate text-[13px] font-medium text-hi">{{ m.name }}</span>
             <span class="shrink-0 rounded-md bg-ink-1/80 px-1.5 py-0.5 text-[10px] text-mid">{{ providerLabel(m) }}</span>
             <span v-if="defaultId === m.id" class="shrink-0 rounded-md bg-accent-soft px-1.5 py-0.5 text-[10px] font-medium text-accent">{{ t("model.default") }}</span>
+            <!-- 生效的调度模型（可能来自回落）；显式设置时加边框区分 -->
+            <span
+              v-if="effectiveJudgeId === m.id"
+              class="shrink-0 rounded-md px-1.5 py-0.5 text-[10px] font-medium"
+              :class="isExplicitJudge(m) ? 'bg-emerald-500/20 text-emerald-300 ring-1 ring-emerald-500/40' : 'bg-emerald-500/10 text-emerald-400/80'"
+            >{{ t("model.groupJudge") }}</span>
           </div>
           <p class="mt-0.5 truncate text-xs text-lo">{{ m.model_name || m.base_url || t("model.noModelName") }}</p>
         </div>
@@ -128,6 +173,20 @@ async function remove(m: ModelConfig) {
             @click="setDefault(m)"
           >
             <Star :size="15" :fill="defaultId === m.id ? 'currentColor' : 'none'" />
+          </button>
+          <button
+            class="flex h-8 w-8 items-center justify-center rounded-lg transition-colors"
+            :class="isExplicitJudge(m) ? 'text-emerald-400' : 'text-lo hover:bg-ink-1 hover:text-emerald-400'"
+            :title="isExplicitJudge(m)
+              ? t('model.clearGroupJudge')
+              : (effectiveJudgeId === m.id ? t('model.setAsGroupJudgeOnly') : t('model.setAsGroupJudge'))"
+            @click="setGroupJudge(m)"
+          >
+            <MessagesSquare
+              :size="15"
+              :fill="isExplicitJudge(m) ? 'currentColor' : (effectiveJudgeId === m.id ? 'currentColor' : 'none')"
+              :class="!isExplicitJudge(m) && effectiveJudgeId === m.id ? 'opacity-40' : ''"
+            />
           </button>
           <button
             class="flex h-8 w-8 items-center justify-center rounded-lg text-lo transition-colors hover:bg-ink-1 hover:text-accent"

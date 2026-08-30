@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, reactive, ref, watch } from "vue";
-import { BookOpen, Brain, Loader2, Save, Server, Sparkles, Wrench, UserPlus, Users } from "lucide-vue-next";
+import { BookOpen, Brain, FolderOpen, Loader2, Save, Server, Sparkles, Wrench, UserPlus, Users } from "lucide-vue-next";
 import Modal from "../components/common/Modal.vue";
 import ModelEditorModal from "../components/settings/ModelEditorModal.vue";
 import GroupForm from "../components/contacts/GroupForm.vue";
@@ -11,13 +11,14 @@ import McpSelector from "../components/selectors/McpSelector.vue";
 import BotAvatar from "../components/common/BotAvatar.vue";
 import Select from "../components/common/Select.vue";
 import { chatApi } from "../services/chatApi";
+import { agentApi } from "../services/agentApi";
 import { dicebearUrl, randomSeed } from "../utils/avatar";
 import { useAppStore } from "../stores/app";
 import { useBotsStore } from "../stores/bots";
 import { useConversationsStore } from "../stores/conversations";
 import { useModelsStore } from "../stores/models";
 import { useSettingsStore } from "../stores/settings";
-import type { BotMemory, ModelConfig } from "../types";
+import type { BotMemory, ModelConfig, ModelProvider } from "../types";
 import { t } from "../i18n";
 
 const app = useAppStore();
@@ -36,15 +37,25 @@ const agentTabs = computed(() => [
   { value: "mcp", label: t("settings.mcp"), icon: Server },
 ] as const);
 
+/**
+ * 主动发言的空闲窗口默认落在 5–10 分钟。
+ * 随机化是为了让多个开启主动发言的好友错开节奏，不至于同时开口。
+ */
+function randomIdleMinutes(): number {
+  return 5 + Math.floor(Math.random() * 6)
+}
+
 const form = reactive({
   name: "",
   avatar: null as string | null,
   persona: "",
   skills: "",
   model_id: "" as string,
-  active_rate: 0.3,
-  keywords: "",
-  cooldown_seconds: 60,
+  // 群聊触发：默认不主动开口，勾选后按空闲窗口发言
+  auto_speak: false,
+  idle_trigger_minutes: randomIdleMinutes(),
+  // 工作目录：留空 = 沿用后端默认目录
+  workspace_dir: "" as string,
   // Agent 能力
   agent_enabled: 1,
   max_turns: 50,
@@ -72,9 +83,9 @@ watch(
       form.persona = target.persona;
       form.skills = target.skills.join(", ");
       form.model_id = target.model_id ?? "";
-      form.active_rate = target.trigger_config.active_rate;
-      form.keywords = target.trigger_config.keywords.join(", ");
-      form.cooldown_seconds = target.trigger_config.cooldown_seconds;
+      form.auto_speak = target.trigger_config.auto_speak === true;
+      form.idle_trigger_minutes = target.trigger_config.idle_trigger_minutes ?? randomIdleMinutes();
+      form.workspace_dir = target.workspace_dir ?? "";
       form.agent_enabled = target.agent_enabled ?? 0;
       form.max_turns = target.max_turns ?? 50;
       form.approval_policy = target.approval_policy ?? "allow";
@@ -88,9 +99,9 @@ watch(
       form.persona = "";
       form.skills = "";
       form.model_id = "";
-      form.active_rate = 0.3;
-      form.keywords = "";
-      form.cooldown_seconds = 60;
+      form.auto_speak = false;
+      form.idle_trigger_minutes = randomIdleMinutes();
+      form.workspace_dir = "";
       form.agent_enabled = 1;
       form.max_turns = 50;
       form.approval_policy = "allow";
@@ -198,6 +209,25 @@ async function generatePersona() {
   }
 }
 
+/**
+ * 打开系统目录选择对话框挑一个工作目录。
+ * 用户取消时保持原值不变（不要清空，避免误点丢掉已填内容）。
+ */
+async function pickWorkspaceDir() {
+  try {
+    // 从当前值出发，未填时从默认目录出发
+    const start =
+      form.workspace_dir.trim() !== ""
+        ? form.workspace_dir
+        : await chatApi.getDefaultWorkspaceDir().catch(() => undefined);
+    const picked = await agentApi.pickDir(start);
+    if (picked) form.workspace_dir = picked;
+  } catch (e) {
+    // 非 Tauri 环境（浏览器开发）不支持原生对话框
+    app.toast(e instanceof Error ? e.message : String(e));
+  }
+}
+
 async function save() {
   const name = form.name.trim();
   if (!name) {
@@ -215,13 +245,15 @@ async function save() {
     persona: form.persona.trim(),
     skills: form.skills.split(/[,，]/).map((s) => s.trim()).filter(Boolean),
     model_id: model.id,
-    model_provider: model.route_id || model.provider,
+    // 后端 provider 字段实际存的是模型路由 id（按路由解析真实供应商），
+    // 与 ModelProvider 的字面量联合不对应，按后端契约断言。
+    model_provider: (model.route_id || model.provider) as ModelProvider,
     model_name: model.model_name,
     trigger_config: {
-      active_rate: Number(form.active_rate),
-      keywords: form.keywords.split(/[,，]/).map((s) => s.trim()).filter(Boolean),
-      cooldown_seconds: Number(form.cooldown_seconds),
+      auto_speak: form.auto_speak,
+      idle_trigger_minutes: Number(form.idle_trigger_minutes),
     },
+    workspace_dir: form.workspace_dir.trim() || null,
     agent_enabled: Number(form.agent_enabled),
     max_turns: Number(form.max_turns),
     approval_policy: form.approval_policy,
@@ -388,23 +420,54 @@ async function save() {
           </svg>
           {{ t("bot.groupTrigger") }}
         </p>
-        <div class="grid grid-cols-2 gap-3">
-          <div>
-            <label class="mb-1.5 block text-xs text-lo">{{ t("bot.activeRate") }}</label>
-            <input v-model.number="form.active_rate" type="number" min="0" max="1" step="0.1"
-              class="w-full rounded-lg border border-line bg-ink-2/70 px-3 py-2 text-[13px] text-hi outline-none transition-all focus:border-accent/45" />
-          </div>
-          <div>
-            <label class="mb-1.5 block text-xs text-lo">{{ t("bot.cooldown") }}</label>
-            <input v-model.number="form.cooldown_seconds" type="number" min="0" step="1"
-              class="w-full rounded-lg border border-line bg-ink-2/70 px-3 py-2 text-[13px] text-hi outline-none transition-all focus:border-accent/45" />
-          </div>
+        <label class="flex cursor-pointer items-start gap-2.5 rounded-lg border border-line bg-ink-1/40 px-3 py-2.5 transition-colors hover:bg-ink-1/70">
+          <input v-model="form.auto_speak" type="checkbox"
+            class="mt-0.5 h-3.5 w-3.5 shrink-0 cursor-pointer accent-accent" />
+          <span class="min-w-0">
+            <span class="block text-[12px] text-mid">{{ t("bot.autoSpeak") }}</span>
+            <span class="mt-0.5 block text-[11px] leading-relaxed text-lo">{{ t("bot.autoSpeakHint") }}</span>
+          </span>
+        </label>
+        <!-- 触发时间只在允许主动发言时才有意义，未勾选时不占据视线 -->
+        <div v-if="form.auto_speak" class="mt-3">
+          <label class="mb-1.5 block text-xs text-lo">{{ t("bot.idleTriggerMinutes") }}</label>
+          <input v-model.number="form.idle_trigger_minutes" type="number" min="1" max="1440" step="1"
+            class="w-full rounded-lg border border-line bg-ink-2/70 px-3 py-2 text-[13px] text-hi outline-none transition-all focus:border-accent/45" />
+          <p class="mt-1.5 text-[11px] leading-relaxed text-lo">{{ t("bot.idleTriggerHint") }}</p>
         </div>
-        <div class="mt-3">
-          <label class="mb-1.5 block text-xs text-lo">{{ t("bot.keywords") }}</label>
-          <input v-model="form.keywords" type="text" :placeholder="t('bot.keywordsPlaceholder')"
-            class="w-full rounded-lg border border-line bg-ink-2/70 px-3 py-2 text-[13px] text-hi outline-none transition-all placeholder:text-lo focus:border-accent/45" />
+      </div>
+
+      <!-- 工作目录：点击选择系统目录，留空则沿用后端默认目录 -->
+      <div>
+        <label class="mb-1.5 block text-xs text-mid">{{ t("bot.workspaceDir") }}</label>
+        <div class="flex items-center gap-2">
+          <input
+            :value="form.workspace_dir"
+            type="text"
+            readonly
+            :placeholder="t('bot.workspaceDirPlaceholder')"
+            class="min-w-0 flex-1 cursor-default truncate rounded-lg border border-line bg-ink-2/70 px-3 py-2 font-mono text-[12px] text-hi outline-none transition-all placeholder:text-lo focus:border-accent/45"
+            @click="pickWorkspaceDir"
+          />
+          <button
+            type="button"
+            class="flex shrink-0 cursor-pointer items-center gap-1.5 rounded-lg border border-line bg-ink-2 px-3 py-2 text-[12px] text-mid transition-colors hover:border-accent/45 hover:text-accent"
+            @click="pickWorkspaceDir"
+          >
+            <FolderOpen :size="13" />
+            {{ t("bot.workspaceDirBrowse") }}
+          </button>
+          <button
+            v-if="form.workspace_dir"
+            type="button"
+            class="shrink-0 cursor-pointer rounded-lg border border-line px-2.5 py-2 text-[12px] text-lo transition-colors hover:text-hi"
+            :title="t('bot.workspaceDirClear')"
+            @click="form.workspace_dir = ''"
+          >
+            ×
+          </button>
         </div>
+        <p class="mt-1.5 text-[11px] leading-relaxed text-lo">{{ t("bot.workspaceDirHint") }}</p>
       </div>
       <div class="flex justify-end gap-2 pt-1">
         <button class="rounded-lg border border-line-strong/50 px-4 py-2 text-[13px] text-mid transition-all hover:bg-ink-3 hover:text-hi"

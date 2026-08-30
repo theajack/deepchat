@@ -576,11 +576,13 @@ const usageText = computed(() => {
            仅 AI 输出内容时显示，流式时常显，结束后 hover 显示 -->
       <div
         v-if="!item.isSelf && hasOutput"
-        class="absolute -bottom-5 left-1 z-10 flex items-center gap-1.5 transition-opacity duration-150"
+        class="absolute -bottom-5 left-1 z-10 flex items-center gap-1.5 transition-opacity duration-150
+               before:absolute before:-top-4 before:inset-x-0 before:h-4 before:content-['']"
         :class="item.streaming ? 'opacity-100' : 'opacity-0 group-hover:opacity-100 pointer-events-none group-hover:pointer-events-auto'"
       >
         <button
-          class="cursor-pointer rounded p-0.5 text-lo transition-colors hover:bg-ink-3 hover:text-hi"
+          class="relative cursor-pointer rounded p-1.5 text-lo transition-colors hover:bg-ink-3 hover:text-hi
+                 before:absolute before:-inset-2 before:content-['']"
           :title="copied ? t('msg.copied') : t('msg.copy')"
           @click="onCopy"
         >

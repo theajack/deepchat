@@ -310,6 +310,8 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_http::init())
+        // 原生文件/目录选择对话框（好友工作目录选择）
+        .plugin(tauri_plugin_dialog::init())
         .on_page_load(on_page_load)
         .setup(|app| {
             #[cfg(target_os = "macos")]

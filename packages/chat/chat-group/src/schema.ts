@@ -24,3 +24,11 @@ export const botSessionRecordSchema = z.object({
   createdAt: z.number().int().nonnegative(),
   updatedAt: z.number().int().nonnegative(),
 })
+
+/**
+ * One stored domain setting value.
+ *
+ * Settings are kept as plain strings so that introducing a new key never
+ * requires a domain migration — the reader decides how to interpret it.
+ */
+export const settingValueSchema = z.string()
