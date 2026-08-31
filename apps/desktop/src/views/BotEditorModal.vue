@@ -187,16 +187,13 @@ async function generatePersona() {
   // 立即清空旧人设，流式输出新内容
   form.persona = "";
   try {
-    // 使用全局默认模型生成人设
-    const defaultModelId = settings.values["default_model_id"];
-    const model = defaultModelId ? models.items.find((m) => m.id === defaultModelId) : undefined;
+    // 使用通用处理模型生成人设（未显式设置时后端回落到 AI 好友默认使用模型）
+    const { effectiveId } = await chatApi.getGeneralModel();
     await chatApi.generatePersona(
       {
         name,
         partial: "", // 已通过 form.persona 清空，不再传旧内容
-        model_id: model?.id ?? null,
-        model_provider: model ? undefined : "mock",
-        model_name: model?.model_name ?? "mock-1",
+        model_id: effectiveId === "" ? null : effectiveId,
       },
       (delta) => {
         form.persona = (form.persona + delta).trim();

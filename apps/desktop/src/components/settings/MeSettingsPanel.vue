@@ -4,15 +4,11 @@ import { Sparkles, User } from "lucide-vue-next";
 import AvatarEditor from "../common/AvatarEditor.vue";
 import { useSelfStore } from "../../stores/self";
 import { useAppStore } from "../../stores/app";
-import { useModelsStore } from "../../stores/models";
-import { useSettingsStore } from "../../stores/settings";
 import { chatApi } from "../../services/chatApi";
 import { t } from "../../i18n";
 
 const self = useSelfStore();
 const app = useAppStore();
-const models = useModelsStore();
-const settings = useSettingsStore();
 
 const name = ref("");
 const avatar = ref<string | null>(null);
@@ -56,14 +52,13 @@ async function generateIntro() {
   const prev = intro.value;
   intro.value = "";
   try {
-    const defaultModelId = settings.values["default_model_id"];
-    const model = defaultModelId ? models.items.find((m) => m.id === defaultModelId) : undefined;
+    // 使用通用处理模型（未显式设置时后端回落到 AI 好友默认使用模型）
+    const { effectiveId } = await chatApi.getGeneralModel();
     await chatApi.generateSelfIntro(
       {
         name: n,
         partial: prev,
-        model_id: model?.id ?? null,
-        model_provider: model ? undefined : "mock",
+        model_id: effectiveId === "" ? null : effectiveId,
       },
       (delta) => {
         intro.value += delta;

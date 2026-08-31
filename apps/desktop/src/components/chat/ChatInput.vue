@@ -36,16 +36,19 @@ const composing = ref(false);
 // ── 附件草稿（图片 / 文件）──────────────────────────────────────────────
 interface DraftAttachment {
   id: string;
-  kind: "image" | "file";
+  /** image=图片内联 / file=文本文件内联 / document=二进制文档上传后按路径读 */
+  kind: "image" | "file" | "document";
   name: string;
   mediaType: string;
   size: number;
   /** 本地预览/下载 data URL（图片直接展示，文件用于下载） */
   dataUrl: string;
-  /** 图片：纯 base64（不含 data: 前缀），发送给后端走 image 附件 */
+  /** 图片与文档：纯 base64（不含 data: 前缀） */
   base64: string;
   /** 文本类文件：读取的文本内容，发送时作为文本块附加 */
   textContent?: string;
+  /** 文档上传成功后回填的工作区相对路径 */
+  uploadedPath?: string;
 }
 const attachments = ref<DraftAttachment[]>([]);
 const imageInputRef = ref<HTMLInputElement | null>(null);
@@ -60,6 +63,12 @@ const TEXT_EXTS = new Set([
   "vue", "sql", "csv", "log", "ini", "conf", "properties", "gradle", "cmake",
   "makefile", "dockerfile", "gitignore", "env",
 ]);
+
+/**
+ * 二进制文档扩展名。与后端 upload.ts 的 ALLOWED_EXTS 保持一致：
+ * 存下来的文件必须能被 read_document 读回，否则上传没有意义。
+ */
+const DOC_EXTS = new Set(["docx", "xlsx", "pptx", "pdf"]);
 function extOf(name: string): string {
   const i = name.lastIndexOf(".");
   return i < 0 ? "" : name.slice(i + 1).toLowerCase();
@@ -70,6 +79,13 @@ function isImageType(mediaType: string): boolean {
 function isTextFile(file: File): boolean {
   if (file.type && (file.type.startsWith("text/") || file.type === "application/json" || file.type.endsWith("xml"))) return true;
   return TEXT_EXTS.has(extOf(file.name));
+}
+/**
+ * 二进制文档（office/pdf）：无法内联进正文，需先上传到好友工作区，
+ * 再把路径交给模型用 read_document 读取。
+ */
+function isDocumentFile(file: File): boolean {
+  return DOC_EXTS.has(extOf(file.name));
 }
 
 function readAsBase64(file: File): Promise<string> {
@@ -100,12 +116,33 @@ async function addImageFile(file: File) {
   ];
 }
 
+/**
+ * 二进制文档附件：先在本地暂存（气泡展示 + 待上传字节），
+ * 真正的落盘发生在发送时（需要知道发给哪个好友）。
+ */
+async function addDocumentFile(file: File) {
+  const base64 = await readAsBase64(file);
+  const mediaType =
+    file.type ||
+    ({ docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+       xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+       pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+       pdf: "application/pdf" } as Record<string, string>)[extOf(file.name)] ||
+    "application/octet-stream";
+  attachments.value = [
+    ...attachments.value,
+    { id: crypto.randomUUID(), kind: "document", name: file.name, mediaType, size: file.size, dataUrl: `data:${mediaType};base64,${base64}`, base64 },
+  ];
+}
+
 async function addFile(file: File) {
   if (file.size > MAX_ATTACH_SIZE) {
     app.toast(t("attach.tooLarge"));
     return;
   }
   if (isImageType(file.type)) return addImageFile(file);
+  // 二进制文档：读成 base64 暂存，发送时上传到工作区再告诉模型路径
+  if (isDocumentFile(file)) return addDocumentFile(file);
   if (!isTextFile(file)) {
     app.toast(t("attach.unsupported"));
     return;
@@ -204,6 +241,19 @@ const members = computed<Bot[]>(() => {
 const mentionMembers = computed(() =>
   members.value.filter((m) => m.name.toLowerCase().includes(mentionQuery.value.toLowerCase())),
 );
+
+/**
+ * 文档上传目标好友。
+ *
+ * 私聊就是对方；群聊则取第一个成员——文件只落在它自己的工作区里，
+ * 受沙箱限制其他成员读不到，但至少发起对话的那位能处理。
+ */
+function resolveUploadTarget(): string | undefined {
+  const c = conv.value;
+  if (c === undefined || c === null) return undefined;
+  if (c.type === "private") return c.id.startsWith("private:") ? c.id.slice("private:".length) : undefined;
+  return members.value[0]?.id;
+}
 
 function modelName(bot: Bot): string {
   const m = bot.model_id ? models.items.find((x) => x.id === bot.model_id) : undefined;
@@ -364,18 +414,53 @@ async function send() {
     }
   }
 
+  // 非图片附件（文本文件 + 二进制文档）统一落盘到好友工作区：
+  // 文档必须落盘（模型要靠路径读取），文本文件落盘是为了刷新后卡片可点开。
+  const files = attachments.value.filter((a) => a.kind !== "image");
+  const uploadTarget = files.length > 0 ? await resolveUploadTarget() : undefined;
+  if (files.length > 0 && uploadTarget === undefined) {
+    // 没有落盘目标时：文档不允许发送（模型将无从读取），文本降级继续
+    if (files.some((f) => f.kind === "document")) {
+      app.toast(t("attach.uploadNoTarget"));
+      sending.value = false;
+      return;
+    }
+  }
+  for (const f of files) {
+    if (uploadTarget === undefined) continue // 文本文件降级：正文已内联，仅失去落盘能力
+    try {
+      const uploaded = await chatApi.uploadFile(uploadTarget, f.name, f.base64);
+      f.uploadedPath = uploaded.path;
+      if (f.kind === "document") {
+        content +=
+          (content ? "\n\n" : "") +
+          `[文档 ${f.name}]\n已保存到你的工作区：\`${uploaded.path}\`\n请用 read_document 读取该文件（不要用 read，read 无法处理二进制文档）。`;
+      }
+    } catch (e) {
+      if (f.kind === "document") {
+        // 文档失败必须中断：模型会拿到不存在的路径
+        app.toast(e instanceof Error ? e.message : String(e));
+        sending.value = false;
+        return;
+      }
+      // 文本文件失败不阻断：内容已在正文里，只是失去“点击打开”能力
+    }
+  }
+
   // 图片走后端 image 附件
   const images = attachments.value
     .filter((a) => a.kind === "image")
     .map((a) => ({ mediaType: a.mediaType, data: a.base64, name: a.name, size: a.size }));
 
-  // 本地气泡展示用附件（图片 dataUrl + 文件 dataUrl，历史消息无字节）
+  // 本地气泡展示用附件：图片带 dataUrl 即时渲染，文件带 ref 供点击打开；
+  // 刷新后历史接口返回同样的元信息（图片换成后端 URL），气泡所见一致
   const messageAttachments = attachments.value.map((a) => ({
     kind: a.kind,
     name: a.name,
     mediaType: a.mediaType,
     size: a.size,
     dataUrl: a.dataUrl,
+    ...(a.uploadedPath ? { ref: a.uploadedPath } : {}),
   }));
 
   sending.value = true;
@@ -552,7 +637,14 @@ function onKeydown(e: KeyboardEvent) {
 
     <!-- 隐藏文件选择框：图片 / 任意文件 -->
     <input ref="imageInputRef" type="file" accept="image/*" multiple class="hidden" @change="onPickImages" />
-    <input ref="fileInputRef" type="file" multiple class="hidden" @change="onPickFiles" />
+    <input
+      ref="fileInputRef"
+      type="file"
+      multiple
+      accept=".txt,.md,.json,.csv,.log,.yml,.yaml,.toml,.xml,.html,.css,.js,.ts,.py,.go,.rs,.java,.sh,.sql,.env,.gitignore,.docx,.xlsx,.pptx,.pdf"
+      class="hidden"
+      @change="onPickFiles"
+    />
 
     <!-- 搜索聊天记录弹窗 -->
     <ConversationSearchModal v-if="searchOpen" @close="searchOpen = false" />

@@ -1,5 +1,6 @@
 import type { Bot, BotInput, BotMemory, Conversation, Message, MessageAttachment, ModelConfig, ModelInput, UpdateConversationInput } from '../types'
 import { transport, type IpcTransport } from './ipc'
+import { dshBaseUrl } from './transport/dsh'
 
 /** 一页历史消息 + 是否还有更早的记录 */
 export interface MessagePage {
@@ -26,8 +27,60 @@ export interface GeneralModel {
   effectiveId: string
 }
 
+/** 一天的用量 */
+export interface DailyUsage {
+  date: string
+  inputTokens: number
+  outputTokens: number
+  totalTokens: number
+  requests: number
+}
+
+/** 单个模型的累计用量 + 最近若干天的每日明细 */
+export interface ModelUsage {
+  modelId: string
+  modelName: string
+  inputTokens: number
+  outputTokens: number
+  totalTokens: number
+  requests: number
+  daily: DailyUsage[]
+}
+
+/**
+ * Token 用量报表。
+ *
+ * 与后端 `TokenUsageReport` 结构一致（前端刻意不 import 后端包，两端独立演进，
+ * 只是字段对齐）。`days` 是最近 7 天的日期，`daily` 为所有模型按天合计。
+ */
+export interface TokenUsageReport {
+  days: string[]
+  models: ModelUsage[]
+  grandTotal: Omit<DailyUsage, 'date'>
+  daily: DailyUsage[]
+}
+
+/** 上传成功的文档（路径相对好友工作区，供 read_document 读取） */
+export interface UploadedFile {
+  path: string
+  name: string
+  size: number
+}
+
 /** 人设/介绍生成的种类，决定后端选用哪套提示词 */
 export type PersonaKind = 'botPersona' | 'selfIntro' | 'groupIntro'
+
+/** 一次人设/介绍生成请求的入参 */
+export interface PersonaInput {
+  /** 主体名称：好友名 / 我的昵称 / 群名 */
+  name: string
+  /** 用户已填的片段，作为基底润色而非丢弃 */
+  partial?: string
+  /** 群成员显示名，仅生成群聊介绍时使用 */
+  memberNames?: string[]
+  /** 显式指定模型 id；省略时后端回落到通用处理模型 */
+  model_id?: string | null
+}
 
 /** 类型化业务 API 门面：stores 只依赖它，不直接感知传输层（SRP + DIP） */
 export class ChatApi {
@@ -75,6 +128,19 @@ export class ChatApi {
    */
   getGeneralModel(): Promise<GeneralModel> {
     return this.t.request('model.getGeneral')
+  }
+
+  /** Read the aggregated token-usage report (per model + 7-day trend). */
+  getTokenUsage(): Promise<TokenUsageReport> {
+    return this.t.request('tokenUsage.report')
+  }
+
+  /**
+   * Upload a binary document into a bot's workspace.
+   * @returns path relative to that workspace, for `read_document` to consume.
+   */
+  uploadFile(botId: string, name: string, base64: string): Promise<UploadedFile> {
+    return this.t.request('file.upload', { botId, name, data: base64 })
   }
 
   /** Read the group-chat-wide settings. */
@@ -172,65 +238,65 @@ export class ChatApi {
     return this.t.request('settings.dataDirs')
   }
 
-  generatePersona(
-    input: { name: string; partial?: string; model_provider?: string; model_name?: string; model_id?: string | null },
+  /**
+   * Stream one generated text back delta by delta.
+   *
+   * Persona generation is inherently a stream (the field fills in as the model
+   * writes), so it talks to the host's SSE endpoint directly instead of going
+   * through the request/response envelope in {@link IpcTransport}.
+   *
+   * Always runs on the general-purpose model unless `model_id` pins another.
+   */
+  private async streamPersona(
+    body: Record<string, unknown>,
     onDelta: (delta: string) => void,
   ): Promise<{ content: string }> {
-    const requestId = crypto.randomUUID()
-    let off: (() => void) | undefined
-    return new Promise((resolve, reject) => {
-      import('./ipc').then(({ transport }) => {
-        off = transport.onEvent((frame) => {
-          if (frame.event !== 'persona.stream') return
-          const data = frame.data as { requestId: string; delta: string; done: boolean; error?: string }
-          if (data.requestId !== requestId) return
-          if (data.error) {
-            off?.()
-            reject(new Error(data.error))
-            return
-          }
-          if (data.done) {
-            off?.()
-            return
-          }
-          onDelta(data.delta)
-        })
-      })
-      this.t
-        .request<{ content: string }>('persona.generate', { ...input, requestId })
-        .then(resolve, reject)
+    const res = await fetch(`${dshBaseUrl()}/chatapi/persona/generate`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
     })
+    if (!res.ok || res.body === null) {
+      const detail = await res.text().catch(() => '')
+      throw new Error(detail === '' ? `生成失败 (HTTP ${String(res.status)})` : detail)
+    }
+
+    const reader = res.body.getReader()
+    const decoder = new TextDecoder()
+    let buffer = ''
+    let content = ''
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) break
+      buffer += decoder.decode(value, { stream: true })
+      let boundary = buffer.indexOf('\n\n')
+      while (boundary >= 0) {
+        const payload = buffer.slice(0, boundary).replace(/^data: /, '').trim()
+        buffer = buffer.slice(boundary + 2)
+        boundary = buffer.indexOf('\n\n')
+        if (payload === '') continue
+        const frame = JSON.parse(payload) as { delta?: string; done?: boolean; content?: string; error?: string }
+        if (typeof frame.error === 'string') throw new Error(frame.error)
+        if (typeof frame.delta === 'string') onDelta(frame.delta)
+        else if (frame.done === true) content = frame.content ?? ''
+      }
+    }
+    return { content }
   }
 
-  /** 生成自我介绍（复用 persona.stream 事件流） */
-  generateSelfIntro(
-    input: { name: string; partial?: string; model_provider?: string; model_name?: string; model_id?: string | null },
-    onDelta: (delta: string) => void,
-  ): Promise<{ content: string }> {
-    const requestId = crypto.randomUUID()
-    let off: (() => void) | undefined
-    return new Promise((resolve, reject) => {
-      import('./ipc').then(({ transport }) => {
-        off = transport.onEvent((frame) => {
-          if (frame.event !== 'persona.stream') return
-          const data = frame.data as { requestId: string; delta: string; done: boolean; error?: string }
-          if (data.requestId !== requestId) return
-          if (data.error) {
-            off?.()
-            reject(new Error(data.error))
-            return
-          }
-          if (data.done) {
-            off?.()
-            return
-          }
-          onDelta(data.delta)
-        })
-      })
-      this.t
-        .request<{ content: string }>('persona.generateSelfIntro', { ...input, requestId })
-        .then(resolve, reject)
-    })
+  /** 生成 AI 好友人设（使用通用处理模型） */
+  generatePersona(input: PersonaInput, onDelta: (delta: string) => void): Promise<{ content: string }> {
+    return this.streamPersona({ ...input, kind: 'botPersona' }, onDelta)
+  }
+
+  /** 生成我的自我介绍（使用通用处理模型） */
+  generateSelfIntro(input: PersonaInput, onDelta: (delta: string) => void): Promise<{ content: string }> {
+    return this.streamPersona({ ...input, kind: 'selfIntro' }, onDelta)
+  }
+
+  /** 生成群聊介绍（使用通用处理模型） */
+  generateGroupIntro(input: PersonaInput, onDelta: (delta: string) => void): Promise<{ content: string }> {
+    return this.streamPersona({ ...input, kind: 'groupIntro' }, onDelta)
   }
 }
 

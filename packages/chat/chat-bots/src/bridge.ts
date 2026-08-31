@@ -1,4 +1,9 @@
 import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
+import {
+  collectAttachmentEvents,
+  rememberImageRefs,
+  type ChatAttachmentMeta,
+} from './attachments.ts'
 
 /**
  * Shared translation of agent session events into the legacy chat-agent
@@ -33,6 +38,12 @@ export interface ChatMessageRow {
   readonly cachedTokens: number
   readonly durationMs: number
   readonly stopReason: string
+  /**
+   * Attachments the user sent with this message (images render inline, the
+   * rest as cards). Restored from the session log so they survive a reload;
+   * absent when the message had none.
+   */
+  readonly attachments?: readonly ChatAttachmentMeta[]
 }
 
 /** Where a translated event goes: one conversation and one speaking bot. */
@@ -412,6 +423,8 @@ export function renderPrivateHistory(session: Session, botId: string, botName: s
   const rows: ChatMessageRow[] = []
   const lastTurnEndByPrompt = new Map<number, number>()
   let promptSeq = 0
+  // 附件按"下一条 user/message"归属，先整段收集再查表
+  const attachmentBySeq = collectAttachmentEvents(session)
 
   for (const event of session.events) {
     switch (event.type) {
@@ -422,7 +435,16 @@ export function renderPrivateHistory(session: Session, botId: string, botName: s
           .filter(block => block.type === 'text')
           .map(block => block.text)
           .join('')
-        if (text === '') break
+        // 重新记住图片引用：宿主重启后内存映射是空的，而这里是每次刷新
+        // 都会走到的地方，正好用来回填（前端总是先拉历史再画图片）。
+        rememberImageRefs(
+          event.data.content
+            .filter((block): block is Extract<typeof block, { type: 'image' }> => block.type === 'image')
+            .map(block => block.attachment),
+        )
+        const attachments = attachmentBySeq.get(event.seq) ?? []
+        // 纯图片消息没有文字，但气泡必须保留——否则只发图片会凭空消失
+        if (text === '' && attachments.length === 0) break
         rows.push({
           id: `u-${String(event.seq)}`,
           kind: 'user',
@@ -431,13 +453,14 @@ export function renderPrivateHistory(session: Session, botId: string, botName: s
           text,
           senderId: 'me',
           senderName: 'me',
-          segments: [{ type: 'text', content: text }],
+          segments: text === '' ? [] : [{ type: 'text', content: text }],
           toolCalls: [],
           promptTokens: 0,
           completionTokens: 0,
           cachedTokens: 0,
           durationMs: 0,
           stopReason: '',
+          ...attachments.length > 0 ? { attachments } : {},
         })
         break
       }

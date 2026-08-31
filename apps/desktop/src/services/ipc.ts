@@ -81,6 +81,14 @@ interface DshMessageRow {
   text: string
   segments?: Array<{ type: 'reasoning' | 'text' | 'tool'; content: string; toolId?: string }>
   toolCalls?: DshToolCallRow[]
+  /** 该消息携带的附件元信息（图片引用 / 文件相对路径） */
+  attachments?: Array<{
+    kind?: string
+    name?: string
+    mediaType?: string
+    size?: number
+    ref?: string
+  }>
   promptTokens?: number
   completionTokens?: number
   cachedTokens?: number
@@ -220,6 +228,49 @@ function toFrontMessage(row: DshMessageRow, conversationId: string): FrontMessag
     cached_tokens: row.cachedTokens ?? 0,
     duration_ms: row.durationMs ?? 0,
     stop_reason: row.stopReason ?? '',
+    // 历史消息也带附件：元信息来自 session，字节由 HTTP 端点按需取回
+    ...(Array.isArray(row.attachments) && row.attachments.length > 0
+      ? { attachments: row.attachments.map(toFrontAttachment) }
+      : {}),
+  }
+}
+
+/**
+ * 把后端附件元信息映射成前端形状，并把图片引用补全成可访问的 URL。
+ *
+ * 历史图片的 `ref` 有两种形态：
+ * - 新发送的：`/chatapi/images/<convId>/<file>`，相对路径，前端拼 base URL
+ * - 旧的：`att-<id>`，attachment store id，需走 `/chatapi/attachments/:id`
+ *
+ * 文件的 `ref` 是工作区相对路径，前端拿不到绝对路径，交给后端解析。
+ */
+function toFrontAttachment(raw: {
+  kind?: string
+  name?: string
+  mediaType?: string
+  size?: number
+  ref?: string
+}): Record<string, unknown> {
+  const kind = raw.kind === 'image' ? 'image' : 'document'
+  const name = String(raw.name ?? 'attachment')
+  const ref = String(raw.ref ?? '')
+  let url = ''
+  if (kind === 'image') {
+    if (ref.startsWith('/')) {
+      // 新路径：磁盘上的图片直接由 dsh 端 HTTP 服务
+      url = `${dshBaseUrl()}${ref}`
+    } else if (ref !== '') {
+      // 老路径：attachment store id
+      url = `${dshBaseUrl()}/chatapi/attachments/${encodeURIComponent(ref)}`
+    }
+  }
+  return {
+    kind,
+    name,
+    mediaType: String(raw.mediaType ?? 'application/octet-stream'),
+    size: Number(raw.size ?? 0),
+    ref,
+    url,
   }
 }
 
@@ -446,11 +497,24 @@ export class DshTransport implements IpcTransport {
       const images = Array.isArray(params.images)
         ? (params.images as Array<{ mediaType: string; data: string; name?: string; size?: number }>)
         : []
+      // 文件/文档附件：字节已在发送前上传到工作区，这里只需把元信息交给后端
+      // 落进 session，刷新后历史接口就能原样返回、气泡照常渲染。
       const attachments = Array.isArray(params.attachments) ? params.attachments : []
+      const fileAttachments = attachments
+        .filter((a): a is Record<string, unknown> =>
+          a !== null && typeof a === 'object' && typeof (a as { ref?: unknown }).ref === 'string')
+        .map(a => ({
+          kind: String((a as { kind?: unknown }).kind ?? 'document'),
+          name: String((a as { name?: unknown }).name ?? 'attachment'),
+          mediaType: String((a as { mediaType?: unknown }).mediaType ?? 'application/octet-stream'),
+          size: Number((a as { size?: unknown }).size ?? 0),
+          ref: String((a as { ref?: unknown }).ref),
+        }))
       if (conversationId.startsWith('private:')) {
         await dshSend('POST', `/chatapi/bots/${botIdOfPrivate(conversationId)}/send`, {
           content,
           ...(images.length > 0 ? { images } : {}),
+          ...(fileAttachments.length > 0 ? { attachments: fileAttachments } : {}),
         })
       } else {
         await dshSend('POST', `/chatapi/groups/${conversationId}/send`, { content, senderName: 'me' })
@@ -465,7 +529,8 @@ export class DshTransport implements IpcTransport {
         content_type: 'text',
         is_self: 1,
         created_at: Date.now(),
-        // 本次会话发送的附件：附带 dataUrl 供本地气泡即时展示（历史消息无字节）
+        // 本地即时展示：图片沿用内联 dataUrl，文件沿用已上传的相对路径。
+        // 刷新后改由历史接口返回同样的元信息，因此气泡里看到的是同一套附件。
         ...(attachments.length > 0 ? { attachments } : {}),
       } as T
     }
@@ -553,6 +618,26 @@ export class DshTransport implements IpcTransport {
       return undefined as T
     }
     if (method === 'model.getGeneral') return await this.fetchGeneralModel() as T
+    if (method === 'tokenUsage.report') {
+      return await dshGet<T>('/chatapi/token-usage')
+    }
+    if (method === 'file.upload') {
+      return await dshSend<T>('POST', '/chatapi/misc', {
+        action: 'upload-file',
+        botId: String(params.botId ?? ''),
+        name: String(params.name ?? ''),
+        data: String(params.data ?? ''),
+      })
+    }
+    if (method === 'file.open') {
+      // 用系统默认程序打开好友工作区内的文件：路径解析必须在服务端做，
+      // 前端只知道工作区相对路径，也没有文件系统的访问权
+      return await dshSend<T>('POST', '/chatapi/misc', {
+        action: 'open-file',
+        botId: String(params.botId ?? ''),
+        path: String(params.path ?? ''),
+      })
+    }
     if (method === 'group.getSettings') {
       return await dshGet<T>('/chatapi/group-settings')
     }

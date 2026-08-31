@@ -57,7 +57,10 @@ allowBuilds:
   # The Python runtime deploy includes the reviewed workspace postinstall that
   # restores the executable bit on node-pty's macOS spawn helper.
   '@deepseek-ai/dsh-subprocess-local@file:packages/subprocess/subprocess-local': true
-  tesseract.js: set this to true or false
+  # Transitive dep of officeparser (document parsing). Its postinstall is just
+  # an opencollective sponsorship banner, and officeparser only reaches
+  # tesseract through a dynamic import on the OCR path we never take. Deny it.
+  tesseract.js: false
 
 minimumReleaseAgeExclude:
   # Fresh pi-ai releases carry the model catalog updates that are the whole

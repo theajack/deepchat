@@ -72,6 +72,7 @@ export const en: MessageDict = {
   // Common
   'common.menu': 'Menu',
   'common.close': 'Close',
+  'common.download': 'Download',
   'common.confirmTitle': 'Confirm',
   'common.cancel': 'Cancel',
   'common.confirm': 'Confirm',
@@ -127,6 +128,7 @@ export const en: MessageDict = {
   // Attachments
   'attach.remove': 'Remove',
   'attach.unsupported': 'Unsupported file type',
+  'attach.uploadNoTarget': 'No friend available to receive the file',
   'attach.tooLarge': 'File too large (over 10MB)',
 
   // Search chat history
@@ -350,6 +352,20 @@ export const en: MessageDict = {
 
   // Models
   'model.count': '{count} model configurations',
+  'model.tokenUsage': 'View token usage',
+
+  // Token usage
+  'tokenUsage.title': 'Token usage',
+  'tokenUsage.totalTokens': 'Total',
+  'tokenUsage.inputTokens': 'Input',
+  'tokenUsage.outputTokens': 'Output',
+  'tokenUsage.requests': 'Requests',
+  'tokenUsage.byModel': 'Total usage by model',
+  'tokenUsage.trend7d': 'Daily usage (last 7 days)',
+  'tokenUsage.allModels': 'All models',
+  'tokenUsage.empty': 'No usage recorded yet',
+  'tokenUsage.emptyHint': 'Usage shows up here once you start a conversation.',
+  'tokenUsage.footnote': 'Input counts are billed tokens (uncached + cache read + cache write). Charts show the top 8 models by total.',
   'model.empty': 'No model configurations yet',
   'model.addFirst': 'Click to add your first model',
   'model.default': 'Default',
@@ -363,6 +379,9 @@ export const en: MessageDict = {
   'model.clearGeneral': 'Clear the general model and fall back to the default chat model',
   'model.clearedGeneral': 'General model cleared; falling back to the default chat model',
   'model.setGeneral': 'Set as general-purpose model: {name}',
+  'model.search': 'Search by name or ID…',
+  'model.clearSearch': 'Clear search',
+  'model.noMatch': 'No matching models',
   'model.confirmDelete': 'Delete model "{name}"? Bots using it will no longer work.',
   'model.confirmDeleteTitle': 'Delete model',
   'model.deleted': 'Deleted',

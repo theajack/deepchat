@@ -36,6 +36,25 @@ import { ModelPreferenceStore, DEFAULT_MODEL_KEY, GROUP_JUDGE_MODEL_KEY, type Mo
 import { formatInstalls, installGithubSkill, searchSkillsApi } from './skills-remote.ts'
 import { buildBotAgentSetup, resolveEnabledSkills } from './agent-setup.ts'
 import { LlmTraceRecorder } from './llm-trace.ts'
+import {
+  TokenUsageRecorder,
+  tokenUsageRecordSchema,
+  recentDays,
+  TREND_DAYS,
+  type TokenUsageRecord,
+  type TokenUsageReport,
+} from './token-usage.ts'
+import { saveUploadedFile } from './upload.ts'
+import {
+  appendAttachments,
+  attachmentKindOf,
+  findImageRef,
+  loadImageRefs,
+  rememberImageRefs,
+  resolveWorkspaceFile,
+  writeChatImage,
+  type ChatAttachmentMeta,
+} from './attachments.ts'
 import { writeBotAvatar } from './avatar.ts'
 import {
   consolidateMemory,
@@ -51,6 +70,10 @@ export type { MemorySourceRow } from './memory.ts'
 export { generatePersonaText } from './persona.ts'
 export type { PersonaGenerateOptions, PersonaKind } from './persona.ts'
 export { routeIdFor, ModelPreferenceStore, DEFAULT_MODEL_KEY, GROUP_JUDGE_MODEL_KEY } from './models.ts'
+export { TREND_DAYS } from './token-usage.ts'
+export { saveUploadedFile, sanitizeFileName, MAX_UPLOAD_BYTES } from './upload.ts'
+export type { UploadedFile, UploadFailure } from './upload.ts'
+export type { TokenUsageReport, ModelUsage, DailyUsage } from './token-usage.ts'
 import { configureDebugLog, debugLog, isDebugLogEnabled, tailDebugLog, DEBUG_LOG_PATH } from './debug-log.ts'
 import { generatePersonaText, type PersonaKind } from './persona.ts'
 import { pageRows, renderPrivateHistory, translateSessionEvent } from './bridge.ts'
@@ -159,6 +182,10 @@ const botsDomainSpec = defineDomain({
     // survive a second `storageDomain.open` from one plugin, so all chat-bots
     // tables share a single domain handle.
     models: domainTable<string, ModelRecord>(modelRecordSchema),
+    // Token usage buckets, keyed `modelId|YYYY-MM-DD`. Shares this domain
+    // because the json backend survives only one `storageDomain.open` per
+    // plugin (see the note above `models`).
+    token_usage: domainTable<string, TokenUsageRecord>(tokenUsageRecordSchema),
     // Free-form key/value settings (e.g. the user's default model choice).
     meta: domainTable<string, string>(zod.string()),
   },
@@ -202,6 +229,9 @@ export class ChatBots extends Service {
 
   /** LLM call trace recorder backing the debug「对话信息」window. */
   private trace: LlmTraceRecorder | undefined
+
+  /** Durable per-model, per-day token accounting. */
+  private usage: TokenUsageRecorder | undefined
 
   /**
    * Resolves once the late-activating `settings`/`credentials` services are
@@ -255,6 +285,15 @@ export class ChatBots extends Service {
       const bot = sessionId === undefined ? undefined : this.botBySessionId(sessionId)
       return bot === undefined ? undefined : { botId: bot.id, botName: bot.name }
     })
+    // Token 用量记账：同一 waterfall 的另一路监听，持久化到 token_usage 表。
+    // 与 trace 分开是因为 trace 是内存环形缓冲（重启即失），而用量需要跨重启累积。
+    if (this.domain !== undefined) {
+      const table = this.domain.table('token_usage')
+      this.usage = new TokenUsageRecorder(this.ctx, table, modelId =>
+        this.models?.get(modelId) === undefined ? undefined : { name: this.models.get(modelId)?.name ?? '' })
+      // 清理超出保留窗口的历史桶（失败不影响启动）
+      void this.usage.prune().catch(() => {})
+    }
     // Private-chat event bridge: translate bot session events into the legacy
     // UI shapes and fan them out over the SSE channel.
     this.ctx.on('session/event', (session, event) => {
@@ -714,6 +753,26 @@ export class ChatBots extends Service {
     }
   }
 
+  /**
+   * Aggregated token usage for the settings window.
+   *
+   * Returns a zeroed report (rather than throwing) while the recorder is not
+   * mounted yet, so the UI renders an honest empty state during boot instead
+   * of an error toast.
+   */
+  tokenUsageReport(): TokenUsageReport {
+    const empty: TokenUsageReport = {
+      days: recentDays(TREND_DAYS),
+      models: [],
+      grandTotal: { inputTokens: 0, outputTokens: 0, totalTokens: 0, requests: 0 },
+      daily: [],
+    }
+    if (this.usage === undefined) {
+      return { ...empty, daily: empty.days.map(date => ({ date, inputTokens: 0, outputTokens: 0, totalTokens: 0, requests: 0 })) }
+    }
+    return this.usage.report()
+  }
+
 
 
   /** Rebuild the live agent for a bot on its existing durable session. */
@@ -798,6 +857,111 @@ export class ChatBots extends Service {
       },
     })
 
+    // ── attachments endpoint（历史消息里的图片字节）──
+    // 图片存于 attachment store，只有 ref 进了 session；刷新后前端靠这里取回
+    this.ctx.webServer.register({
+      kind: 'prefix',
+      path: '/chatapi/attachments',
+      handler: async (req, res) => {
+        try {
+          const id = (req.url ?? '').split('?')[0]?.replace(/^\/+|\/+$/g, '') ?? ''
+          if (req.method !== 'GET' || id === '') {
+            res.writeHead(405, { 'content-type': 'application/json' })
+            res.end(JSON.stringify({ error: 'method not allowed' }))
+            return
+          }
+          // 首次请求（host 重启后）要先等磁盘索引加载完，否则下面 findImageRef
+          // 一定查不到——前端首次刷新通常会在这里撞 race。
+          await loadImageRefs()
+          // AttachmentStore 只接受完整引用、没有按 id 查询的接口，因此靠
+          // 历史索引把 id 还原成引用。
+          const ref = findImageRef(decodeURIComponent(id))
+          if (ref === undefined) {
+            res.writeHead(404, { 'content-type': 'application/json' })
+            res.end(JSON.stringify({ error: 'attachment not found' }))
+            return
+          }
+          const stored = await this.ctx.attachments.readImage(ref)
+          res.writeHead(200, {
+            'content-type': ref.mediaType,
+            'content-length': String(stored.data.byteLength),
+            // 附件不可变，可长期缓存
+            'cache-control': 'private, max-age=31536000, immutable',
+          })
+          res.end(Buffer.from(stored.data))
+        } catch (error: unknown) {
+          res.writeHead(500, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ error: String(error) }))
+        }
+      },
+    })
+
+    // ── images endpoint（历史消息里的图片字节，按磁盘路径）──
+    // ref 现在就是 /chatapi/images/<convId>/<file>，因此端点必须能识别 prefix
+    // 与子路径两段对话 ID 与文件名。
+    this.ctx.webServer.register({
+      kind: 'prefix',
+      path: '/chatapi/images',
+      handler: async (req, res) => {
+        try {
+          if (req.method !== 'GET') {
+            res.writeHead(405, { 'content-type': 'application/json' })
+            res.end(JSON.stringify({ error: 'method not allowed' }))
+            return
+          }
+          const raw = (req.url ?? '').split('?')[0] ?? ''
+          // 形如 /<conversationId>/<file>
+          const match = /^\/([^/]+)\/([^/]+)\/?$/.exec(raw.replace(/^\/+/, ''))
+          if (match === null) {
+            res.writeHead(400, { 'content-type': 'application/json' })
+            res.end(JSON.stringify({ error: 'bad path' }))
+            return
+          }
+          const conversationId = decodeURIComponent(match[1] ?? '')
+          const onDisk = decodeURIComponent(match[2] ?? '')
+          // 引入 readChatImage
+          const { readChatImage } = await import('./attachments.ts')
+          const got = await readChatImage(conversationId, onDisk)
+          if (got === undefined) {
+            res.writeHead(404, { 'content-type': 'application/json' })
+            res.end(JSON.stringify({ error: 'not found' }))
+            return
+          }
+          res.writeHead(200, {
+            'content-type': got.mediaType,
+            'content-length': String(got.data.byteLength),
+            'cache-control': 'private, max-age=31536000, immutable',
+          })
+          res.end(got.data)
+        } catch (error: unknown) {
+          res.writeHead(500, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ error: String(error) }))
+        }
+      },
+    })
+
+    // ── token-usage endpoint（设置「Token 消耗」窗口）──
+    this.ctx.webServer.register({
+      kind: 'prefix',
+      path: '/chatapi/token-usage',
+      handler: async (req, res) => {
+        const json = (status: number, body: unknown): void => {
+          res.writeHead(status, { 'content-type': 'application/json' })
+          res.end(JSON.stringify(body))
+        }
+        try {
+          if (req.method === 'GET') {
+            // 尚未记账时返回空报表而不是报错，前端直接渲染空态
+            return json(200, this.tokenUsageReport())
+          }
+          return json(405, { error: 'method not allowed' })
+        } catch (error: unknown) {
+          this.ctx.logger.warn('chat-bots token-usage endpoint failed: %o', error)
+          return json(500, { error: String(error) })
+        }
+      },
+    })
+
     // ── misc endpoints（工作区目录打开 / 默认工作区根 / 会话预览）──
     this.ctx.webServer.register({
       kind: 'prefix',
@@ -830,11 +994,57 @@ export class ChatBots extends Service {
             return json(200, { ok: true, dir: target })
           }
 
+          // 用系统默认程序打开文件（open/explorer/xdg-open 对文件同样有效）
+          if (action === 'open-file') {
+            const botId = String(body.botId ?? '').trim()
+            // ref 是工作区相对路径；前端拿不到绝对路径，拼接必须在服务端做
+            const relPath = String(body.path ?? '').trim()
+            if (botId === '' || relPath === '') return json(400, { error: 'botId / path 必填' })
+            const bot = this.get(botId)
+            if (bot === undefined) return json(404, { error: `bot "${botId}" not found` })
+            if (bot.workspaceDir === undefined) return json(400, { error: '该好友没有工作目录' })
+            // 重新校验路径：ref 每次都由客户端回传，不能假设它没被改过
+            const abs = resolveWorkspaceFile(bot.workspaceDir, relPath)
+            if (abs === undefined) return json(400, { error: '文件路径不合法' })
+            try {
+              await access(abs)
+            } catch {
+              return json(404, { error: '文件不存在，可能已被删除' })
+            }
+            const command = process.platform === 'darwin' ? 'open' : process.platform === 'win32' ? 'explorer' : 'xdg-open'
+            const child = spawn(command, [abs], { stdio: 'ignore', detached: false })
+            const code = await new Promise<number | null>((resolve) => {
+              child.once('exit', code => resolve(code))
+              child.once('error', () => resolve(null))
+            })
+            if (code !== 0 && code !== null) return json(500, { error: `打开文件失败 (exit ${String(code)})` })
+            if (code === null) return json(500, { error: '无法启动系统打开命令' })
+            return json(200, { ok: true, path: abs })
+          }
+
           // 默认工作区根（旧版约定 ~/chat-agent-workspace）
           if (action === 'default-workspace-dir') {
             const base = join(process.env.HOME ?? '', 'chat-agent-workspace')
             await mkdir(base, { recursive: true })
             return json(200, { dir: base })
+          }
+
+          // 上传文件到好友工作区：二进制附件（office/pdf）无法像文本那样内联
+          // 进消息正文，必须先落盘，再把路径告诉模型，由 read_document 读取。
+          if (action === 'upload-file') {
+            const botId = String(body.botId ?? '').trim()
+            const name = String(body.name ?? '').trim()
+            const data = typeof body.data === 'string' ? body.data : ''
+            if (botId === '' || name === '' || data === '') {
+              return json(400, { error: 'botId / name / data 必填' })
+            }
+            const bot = this.get(botId)
+            if (bot === undefined) return json(404, { error: `bot "${botId}" not found` })
+            if (bot.workspaceDir === undefined) return json(400, { error: '该好友没有工作目录' })
+            const result = await saveUploadedFile(bot.workspaceDir, name, data)
+            if ('error' in result) return json(400, { error: result.error })
+            // 返回工作区相对路径：agent 的 cwd 就是工作区，模型可直接用
+            return json(200, { path: result.relPath, name: result.name, size: result.size })
           }
 
           // 本地调试日志：开关实时生效（老方案 configureDebugLog 迁移）
@@ -1317,12 +1527,74 @@ export class ChatBots extends Service {
             }
             const content: ContentBlock[] = []
             if (text !== '') content.push({ type: 'text', text })
+            const meta: ChatAttachmentMeta[] = []
+            /** 文档提示文本（只进模型上下文，不写回用户消息，否则气泡会多出几行）。 */
+            let docHint = ''
             if (images.length > 0) {
               const refs = await admitEncodedImages(this.ctx.attachments, images)
               content.push(...refs.map((ref): ContentBlock => ({ type: 'image', attachment: ref })))
+              // 记住引用：原 attachment store 端点（保留作回退路径，旧数据 / 历史）
+              rememberImageRefs(refs)
+              // 同时把图片字节写到 $HOME/chat-agent-images/<convId>/<file>，
+              // 让前端拿到一条稳定的 HTTP 路径——host 重启后也不依赖任何内存映射。
+              for (let i = 0; i < refs.length; i++) {
+                const ref = refs[i]
+                const img = images[i]
+                if (ref === undefined || img === undefined) continue
+                const buf = Buffer.from(img.data, 'base64')
+                let relUrl = ''
+                try {
+                  relUrl = await writeChatImage(`bot-${botId}`, img.name ?? `image-${i}`, buf)
+                } catch (e: unknown) {
+                  this.ctx.logger.warn('chat-bots: 写图片到磁盘失败，回退 attachment store: %o', e)
+                }
+                meta.push({
+                  kind: 'image',
+                  name: ref.name ?? images[i]?.name ?? 'image',
+                  mediaType: ref.mediaType,
+                  size: ref.bytes,
+                  // 优先磁盘 URL；如果写盘失败，落回到 attachment id，旧路径还能用
+                  ref: relUrl !== '' ? relUrl : String(ref.attachmentId),
+                })
+              }
+            }
+            // 文件/文档：字节已由 upload-file 写入工作区，ref 是工作区相对路径
+            for (const entry of Array.isArray(body.attachments) ? body.attachments : []) {
+              if (entry === null || typeof entry !== 'object') continue
+              const raw = entry as { name?: unknown; mediaType?: unknown; size?: unknown; ref?: unknown; kind?: unknown }
+              const ref = typeof raw.ref === 'string' ? raw.ref : ''
+              const name = typeof raw.name === 'string' ? raw.name : ''
+              if (ref === '' || name === '') continue
+              const kind = attachmentKindOf(name, typeof raw.mediaType === 'string' ? raw.mediaType : '')
+              meta.push({
+                kind,
+                name,
+                mediaType: typeof raw.mediaType === 'string' ? raw.mediaType : 'application/octet-stream',
+                size: typeof raw.size === 'number' ? raw.size : 0,
+                ref,
+              })
+              if (kind === 'document') {
+                // 提示语累加，最后以一条 plugin followup 注入到 agent 上下文，
+                // 这样用户气泡里不会出现 "[文档 xxx] 已保存到你的工作区..." 这类噪音
+                docHint += (docHint === '' ? '' : '\n\n') +
+                  `[文档 ${name}]\n已保存到你的工作区：\`${ref}\`\n请用 read_document 读取该文件（不要用 read，read 无法处理二进制文档）。`
+              }
             }
             const agent = await this.ensureAgent(botId)
+            // 附件事件必须先于 followup 追加：followup 只是把消息排进 inbox，
+            // 真正的 user/message 事件由 driver 稍后写入，届时才有 seq 可关联。
+            appendAttachments(agent.session, meta)
             agent.followup(createUserMessage({ content, source: { kind: 'user' } }))
+            // 文档提示走 plugin followup：模型能看到，但不会出现在用户消息气泡里
+            // （history 渲染时按 source.kind !== 'user' 过滤掉）。
+            // 注意：必须在 followup 用户消息之后、agent 真正开始下一轮 turn 之前追加，
+            // 否则 driver 会把它和用户消息合到同一个 turn 的开头。
+            if (docHint !== '') {
+              agent.followup(createUserMessage({
+                content: [{ type: 'text', text: docHint }],
+                source: { kind: 'plugin', plugin: 'chat-bots', form: 'notice', summary: '文档附件提示' },
+              }))
+            }
             return json(res, 200, { accepted: true })
           }
 

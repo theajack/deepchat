@@ -116,6 +116,10 @@ export const toolOpenDir = (dir: string) => transport.request<{ ok: boolean; dir
 /** 打开系统目录选择对话框；返回选中的目录，用户取消则返回 null */
 export const pickDir = (defaultPath?: string) =>
   transport.request<string | null>('misc.pickDir', { defaultPath })
+
+/** 用系统默认程序打开好友工作区内的文件 */
+export const openFile = (botId: string, path: string) =>
+  transport.request<{ ok: boolean; path: string }>('file.open', { botId, path })
 export const skillList = (workspaceDir?: string, skillDirs?: string[]) =>
   transport.request<SkillListResult>('skill.list', { workspaceDir, skillDirs })
 export const skillFind = (query: string, owner?: string) =>
@@ -146,6 +150,7 @@ export const agentApi = {
   toolOpenUrl,
   toolOpenDir,
   pickDir,
+  openFile,
   skillList,
   skillFind,
   skillCreate,

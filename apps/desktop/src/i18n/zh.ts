@@ -72,6 +72,7 @@ export const zh: MessageDict = {
   // 通用
   'common.menu': '菜单',
   'common.close': '关闭',
+  'common.download': '下载',
   'common.confirmTitle': '确认操作',
   'common.cancel': '取消',
   'common.confirm': '确认',
@@ -127,6 +128,7 @@ export const zh: MessageDict = {
   // 附件
   'attach.remove': '移除',
   'attach.unsupported': '暂不支持该文件类型',
+  'attach.uploadNoTarget': '找不到可接收文件的好友',
   'attach.tooLarge': '文件过大（超过 10MB）',
 
   // 搜索聊天记录
@@ -350,6 +352,20 @@ export const zh: MessageDict = {
 
   // 模型
   'model.count': '共 {count} 个模型配置',
+  'model.tokenUsage': '查看 Token 消耗',
+
+  // Token 消耗
+  'tokenUsage.title': 'Token 消耗',
+  'tokenUsage.totalTokens': '总消耗',
+  'tokenUsage.inputTokens': '输入',
+  'tokenUsage.outputTokens': '输出',
+  'tokenUsage.requests': '请求数',
+  'tokenUsage.byModel': '各模型累计消耗',
+  'tokenUsage.trend7d': '近 7 天每日消耗',
+  'tokenUsage.allModels': '全部模型',
+  'tokenUsage.empty': '还没有消耗记录',
+  'tokenUsage.emptyHint': '发起一次对话后，用量会自动统计到这里。',
+  'tokenUsage.footnote': '输入量为计费口径（未缓存输入 + 缓存读取 + 缓存写入）；图表仅展示累计排名前 8 的模型。',
   'model.empty': '还没有模型配置',
   'model.addFirst': '点击添加第一个模型',
   'model.default': '默认',
@@ -363,6 +379,9 @@ export const zh: MessageDict = {
   'model.clearGeneral': '取消通用处理模型设置，回落到 AI 好友默认使用模型',
   'model.clearedGeneral': '已取消通用处理模型，将回落到 AI 好友默认使用模型',
   'model.setGeneral': '已设为通用处理模型：{name}',
+  'model.search': '搜索模型名称或 ID…',
+  'model.clearSearch': '清空搜索',
+  'model.noMatch': '无匹配模型',
   'model.confirmDelete': '确定删除模型「{name}」？删除后使用该模型的 AI 好友将无法对话。',
   'model.confirmDeleteTitle': '删除模型',
   'model.deleted': '已删除',

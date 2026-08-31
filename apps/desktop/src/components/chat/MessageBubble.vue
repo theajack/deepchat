@@ -3,12 +3,16 @@ import { computed, nextTick, ref, watch } from "vue";
 import { Brain, Check, ChevronDown, ChevronRight, Copy, FileText } from "lucide-vue-next";
 import Avatar from "../common/Avatar.vue";
 import HoverTip from "../common/HoverTip.vue";
+import ImageLightbox from "../common/ImageLightbox.vue";
 import ToolCallCard from "./ToolCallCard.vue";
 import ContextRing from "../common/ContextRing.vue";
 import { showBotDetail, hideBotDetail } from "../../utils/botDetailHover";
 import { useMessagesStore } from "../../stores/messages";
 import { useBotsStore } from "../../stores/bots";
 import { useModelsStore } from "../../stores/models";
+import { useConversationsStore } from "../../stores/conversations";
+import { useAppStore } from "../../stores/app";
+import { agentApi } from "../../services/agentApi";
 import { formatTime } from "../../utils/display";
 import { renderMarkdown, renderMarkdownStreamed } from "../../utils/markdown";
 import { openUrl } from "../../utils/browser";
@@ -279,6 +283,56 @@ function onMdClick(e: MouseEvent) {
 /** 复制内容（带回退：优先 clipboard API） */
 const copied = ref(false);
 let copyTimer: ReturnType<typeof setTimeout> | undefined;
+
+// ── 附件交互 ────────────────────────────────────────────────
+const conversations = useConversationsStore();
+const app = useAppStore();
+
+/** 图片预览浮层 */
+const previewSrc = ref("");
+const previewName = ref("");
+
+/**
+ * 附件落盘所在的好友：与上传时的 resolveUploadTarget 保持同一规则
+ * （私聊=对方，群聊=第一个成员），否则服务端找不到工作区。
+ */
+function attachmentTargetBotId(): string | undefined {
+  const cid = props.item.conversationId;
+  if (!cid) return undefined;
+  if (cid.startsWith("private:")) return cid.slice("private:".length);
+  return conversations.membersMap[cid]?.[0]?.id;
+}
+
+/**
+ * 点击附件：图片打开预览浮层；文件用系统默认程序打开（工作区路径）。
+ * 无 ref 时（未落盘的历史/降级场景）回退为 dataUrl 下载。
+ */
+async function openAttachment(att: MessageAttachment) {
+  if (att.kind === "image") {
+    const src = att.dataUrl || att.url || "";
+    if (src !== "") {
+      previewSrc.value = src;
+      previewName.value = att.name;
+    }
+    return;
+  }
+  if (att.ref === undefined || att.ref === "") {
+    if (att.dataUrl !== undefined && att.dataUrl !== "") {
+      const a = document.createElement("a");
+      a.href = att.dataUrl;
+      a.download = att.name;
+      a.click();
+    }
+    return;
+  }
+  const botId = attachmentTargetBotId();
+  if (botId === undefined) return;
+  try {
+    await agentApi.openFile(botId, att.ref);
+  } catch (e) {
+    app.toast(e instanceof Error ? e.message : String(e));
+  }
+}
 async function onCopy() {
   const text = rawContent.value;
   if (!text) return;
@@ -546,27 +600,27 @@ const usageText = computed(() => {
           </span>
         </template>
 
-        <!-- 附件展示：图片直接预览，文件显示卡片（仅本次会话发送的附件带 dataUrl） -->
+        <!-- 附件展示：图片点击放大预览；文件卡片点击用系统默认程序打开（dataUrl 兜底下载） -->
         <div v-if="item.attachments && item.attachments.length" class="mt-1.5 flex flex-wrap gap-1.5">
           <template v-for="att in item.attachments" :key="att.name">
-            <a
-              v-if="att.kind === 'image' && att.dataUrl"
-              :href="att.dataUrl"
-              target="_blank"
-              class="block max-w-full overflow-hidden rounded-lg border border-line/50"
+            <button
+              v-if="att.kind === 'image' && (att.dataUrl || att.url)"
+              type="button"
+              class="block max-w-full cursor-zoom-in overflow-hidden rounded-lg border border-line/50"
+              @click="openAttachment(att)"
             >
-              <img :src="att.dataUrl" :alt="att.name" class="max-h-52 max-w-full object-contain" />
-            </a>
-            <a
+              <img :src="att.dataUrl || att.url" :alt="att.name" class="max-h-52 max-w-full object-contain" />
+            </button>
+            <button
               v-else
-              :href="att.dataUrl || undefined"
-              :download="att.name"
-              class="flex max-w-full items-center gap-2 rounded-lg border border-line/50 bg-ink-2/40 px-2 py-1.5"
+              type="button"
+              class="flex max-w-full cursor-pointer items-center gap-2 rounded-lg border border-line/50 bg-ink-2/40 px-2 py-1.5 transition-colors hover:border-accent/40"
+              @click="openAttachment(att)"
             >
               <FileText :size="16" class="shrink-0 text-mid" />
               <span class="truncate text-xs text-hi">{{ att.name }}</span>
               <span class="font-num shrink-0 text-[10px] text-lo">{{ formatSize(att.size) }}</span>
-            </a>
+            </button>
           </template>
         </div>
 
@@ -608,4 +662,12 @@ const usageText = computed(() => {
     </div>
     <span v-if="item.time" class="font-num shrink-0 text-[10px] text-lo" :class="item.isSelf ? 'mr-1.5' : 'ml-1.5'">{{ formatTime(item.time) }}</span>
   </div>
+
+  <!-- 图片放大预览浮层 -->
+  <ImageLightbox
+    v-if="previewSrc !== ''"
+    :src="previewSrc"
+    :name="previewName"
+    @close="previewSrc = ''"
+  />
 </template>

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
-import { Cpu, Search, X } from "lucide-vue-next";
+import { Cpu, Search, Sparkles, X } from "lucide-vue-next";
 import Avatar from "../common/Avatar.vue";
 import BotAgentBadge from "./BotAgentBadge.vue";
 import { useAppStore } from "../../stores/app";
@@ -8,6 +8,7 @@ import { useBotsStore } from "../../stores/bots";
 import { useConversationsStore } from "../../stores/conversations";
 import { useModelsStore } from "../../stores/models";
 import { useSelfStore } from "../../stores/self";
+import { chatApi } from "../../services/chatApi";
 import type { Conversation, Bot } from "../../types";
 import { t } from "../../i18n";
 
@@ -25,6 +26,8 @@ const isEdit = computed(() => props.group != null);
 const name = ref("");
 const intro = ref("");
 const selected = ref<Set<string>>(new Set());
+/** 生成群聊介绍进行中（流式填充期间禁用输入框） */
+const generating = ref(false);
 /** 好友搜索关键字（按名称/模型名过滤；已选中的始终显示） */
 const keyword = ref("");
 
@@ -74,6 +77,35 @@ function toggle(id: string) {
   if (next.has(id)) next.delete(id);
   else next.add(id);
   selected.value = next;
+}
+
+/** 用通用处理模型流式生成群聊介绍（群名 + 已选成员作为素材） */
+async function generateIntro() {
+  const n = name.value.trim();
+  if (n === "") {
+    app.toast(t("group.fillNameFirst"));
+    return;
+  }
+  if (generating.value) return;
+  generating.value = true;
+  intro.value = "";
+  try {
+    const { effectiveId } = await chatApi.getGeneralModel();
+    const memberNames = [
+      selfStore.displayName,
+      ...bots.items.filter((b) => selected.value.has(b.id)).map((b) => b.name),
+    ];
+    await chatApi.generateGroupIntro(
+      { name: n, partial: "", memberNames, model_id: effectiveId === "" ? null : effectiveId },
+      (delta) => {
+        intro.value = (intro.value + delta).trim();
+      },
+    );
+  } catch (e) {
+    app.toast(t("group.generateIntroFailed", { msg: e instanceof Error ? e.message : String(e) }));
+  } finally {
+    generating.value = false;
+  }
 }
 
 /** 获取 AI 好友使用的模型名 */
@@ -131,9 +163,22 @@ async function save() {
         class="w-full rounded-lg border border-line bg-ink-2/70 px-3 py-2 text-[13px] text-hi outline-none transition-all placeholder:text-lo focus:border-accent/45 focus:shadow-[0_0_0_3px_var(--color-accent-soft)]" />
     </div>
     <div>
-      <label class="mb-1.5 block text-xs text-mid">{{ t("group.desc") }}</label>
-      <textarea v-model="intro" rows="3" :placeholder="t('contacts.introPlaceholder')"
-        class="w-full resize-none rounded-lg border border-line bg-ink-2/70 px-3 py-2 text-[13px] leading-relaxed text-hi outline-none transition-all placeholder:text-lo focus:border-accent/45 focus:shadow-[0_0_0_3px_var(--color-accent-soft)]"></textarea>
+      <div class="mb-1.5 flex items-center justify-between">
+        <label class="text-xs text-mid">{{ t("group.desc") }}</label>
+        <button
+          type="button"
+          class="flex items-center gap-1.5 rounded-md border border-line-strong/50 bg-ink-2/70 px-2.5 py-1 text-[11px] text-mid transition-all hover:border-accent/40 hover:bg-ink-3 hover:text-accent disabled:cursor-not-allowed disabled:opacity-50"
+          :disabled="generating || !name.trim()"
+          :title="name.trim() ? t('group.generateIntroTitle') : t('group.fillNameFirst')"
+          @click="generateIntro"
+        >
+          <svg v-if="generating" class="h-3 w-3 animate-spin" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="2.5" stroke-dasharray="16 42" stroke-linecap="round"/></svg>
+          <Sparkles v-else :size="12" />
+          {{ generating ? t("group.generatingIntro") : t("group.generateIntro") }}
+        </button>
+      </div>
+      <textarea v-model="intro" rows="3" :placeholder="t('contacts.introPlaceholder')" :disabled="generating"
+        class="w-full resize-none rounded-lg border border-line bg-ink-2/70 px-3 py-2 text-[13px] leading-relaxed text-hi outline-none transition-all placeholder:text-lo focus:border-accent/45 focus:shadow-[0_0_0_3px_var(--color-accent-soft)] disabled:opacity-50"></textarea>
     </div>
     <div>
       <label class="mb-1.5 block text-xs text-mid">{{ t("group.selectMembers") }}</label>

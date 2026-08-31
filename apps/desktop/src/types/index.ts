@@ -83,14 +83,18 @@ export interface MessageSegment {
   toolId?: string
 }
 
-/** 消息附件（图片 / 文件）。仅本次会话发送的附件带 dataUrl 用于本地展示，历史消息无字节 */
+/** 消息附件（图片 / 文件 / 文档）。本地发送带 dataUrl 即时展示；历史消息由后端返回 url/ref */
 export interface MessageAttachment {
-  kind: 'image' | 'file'
+  kind: 'image' | 'file' | 'document'
   name: string
   mediaType: string
   size: number
-  /** 本地预览 / 下载 data URL（历史消息缺失） */
+  /** 本地发送时的预览 data URL（历史消息缺失，改用 url） */
   dataUrl?: string
+  /** 图片的可访问 URL（历史消息由后端拼好 base URL） */
+  url?: string
+  /** 已落盘附件的工作区相对路径：文件类点击时用系统默认程序打开 */
+  ref?: string
 }
 
 export interface Message {

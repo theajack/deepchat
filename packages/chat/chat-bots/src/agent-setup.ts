@@ -253,7 +253,9 @@ export function buildBotAgentSetup(
     // read_document 工具：解析 docx/xlsx/pptx/pdf。这些是二进制格式，
     // 通用 `read` 工具会直接拒绝，模型若不知道有本工具就会束手无策
     // （甚至尝试自己解压 OOXML）。
-    registerReadDocumentTool(agentCtx)
+    // 注册进 agentCtx（不受工具白名单限制），但文件读取走外层 ctx——
+    // agentCtx 没有声明 fs 依赖，直接用它会抛 "cannot get property fs without inject"
+    registerReadDocumentTool(agentCtx, ctx)
     agentCtx.systemPrompt.section({
       name: 'chat:document-preference',
       order: 1,

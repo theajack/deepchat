@@ -130,10 +130,21 @@ function formatDocumentReadOutput(value: DocumentReadValue): string {
  * Registration is scoped to the bot's agent context (see
  * `buildBotAgentSetup`), which keeps it outside the per-bot `enabledTools`
  * whitelist — a companion can always read its own attachments.
- * @param ctx - the registration scope; execution uses its `fs` service.
+ *
+ * Two contexts are needed on purpose. The tool *registers* into the agent's
+ * context (`target`) so it stays scoped to that companion, but *reads files*
+ * through the host plugin's context (`host`), because Cordis only exposes a
+ * service to a context that declared it — and only the host plugin declares
+ * `fs` in its `inject`. Reaching for `ctx.fs` on the agent context throws
+ * `cannot get property "fs" without inject` the moment the tool first runs.
+ * Both contexts resolve to the same filesystem service instance, so sandbox
+ * and observation behaviour are unchanged.
+ *
+ * @param target - the agent context the tool registers into.
+ * @param host - the plugin context that owns the `fs` service.
  */
-export function registerReadDocumentTool(ctx: Context): void {
-  ctx.tools.register(defineTool({
+export function registerReadDocumentTool(target: Context, host: Context): void {
+  target.tools.register(defineTool({
     name: 'read_document',
     description: 'Extract the text content of an Office document or PDF (.docx, .xlsx, .pptx, .pdf). '
       + 'Use this instead of `read` for these formats — `read` only handles plain text and will reject binary files. '
@@ -206,10 +217,19 @@ export function registerReadDocumentTool(ctx: Context): void {
         throw new Error(`max_chars must not exceed ${String(MAX_CHARS_LIMIT)}, got ${String(maxChars)}`)
       }
 
-      const target = await ctx.fs.resolve(filePath, resolveOptions(exec))
-      const info = await ctx.fs.stat(target, exec.signal)
+      // 防御：fs 服务必须挂在宿主 context 上（靠宿主插件的 inject 声明）。
+      // 缺失时给出可诊断的错误，而不是在下面撞上 undefined。
+      if (host.fs === undefined || typeof host.fs.resolve !== 'function') {
+        throw new Error(
+          'read_document: 文件系统服务不可用（fs 未注入到宿主插件）。'
+          + '请确认宿主插件的 inject 中声明了 "fs"。',
+        )
+      }
+
+      const target = await host.fs.resolve(filePath, resolveOptions(exec))
+      const info = await host.fs.stat(target, exec.signal)
       if (info === undefined) {
-        ctx.emit('fs/observed', target, { kind: 'absent' }, exec)
+        host.emit('fs/observed', target, { kind: 'absent' }, exec)
         throw new FsError(`cannot read "${target.displayPath}": not found`, 'FS_NOT_FOUND')
       }
       if (info.type !== 'file') {
@@ -222,8 +242,8 @@ export function registerReadDocumentTool(ctx: Context): void {
         )
       }
 
-      const data = await ctx.fs.readBytes(target, exec.signal, MAX_FILE_BYTES)
-      ctx.emit('fs/observed', target, { kind: 'present', version: info.version }, exec)
+      const data = await host.fs.readBytes(target, exec.signal, MAX_FILE_BYTES)
+      host.emit('fs/observed', target, { kind: 'present', version: info.version }, exec)
 
       let full: string
       try {

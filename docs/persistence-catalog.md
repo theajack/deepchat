@@ -239,6 +239,19 @@ Types: [TokenUsage](subsystems/llm-streaming.md)
 
 Source: [`packages/core/session/src/types.ts:277`](../packages/core/session/src/types.ts)
 
+### `chat/*`
+
+<a id="chatattachments--log-only"></a>
+
+#### `chat/attachments` — log-only
+
+```ts persistence-catalog
+/** Attachments belonging to the next user message in this session. */
+'chat/attachments': { readonly items: readonly ChatAttachmentMeta[] }
+```
+
+Source: [`packages/chat/chat-bots/src/attachments.ts:59`](../packages/chat/chat-bots/src/attachments.ts)
+
 ### `command/*`
 
 <a id="commanddone--log-only"></a>
@@ -431,15 +444,27 @@ Source: [`packages/goal/goal/src/domain.ts:66`](../packages/goal/goal/src/domain
 #### `group/bot-message` — log-only
 
 ```ts persistence-catalog
-/** One bot reply landed in the group. */
+/** One bot reply landed in the group (with the run's aggregate stats). */
 'group/bot-message': {
   readonly botId: string
   readonly botName: string
   readonly text: string
+  readonly promptTokens?: number
+  readonly completionTokens?: number
+  readonly cachedTokens?: number
+  readonly durationMs?: number
+  readonly segments?: Array<{ type: 'reasoning' | 'text' | 'tool'; content: string; toolId?: string }>
+  readonly toolCalls?: Array<{
+    id: string
+    name: string
+    args?: unknown
+    result?: { content?: Array<{ type: string; text?: string }>; isError?: boolean }
+    isError?: boolean
+  }>
 }
 ```
 
-Source: [`packages/chat/chat-group/src/types.ts:55`](../packages/chat/chat-group/src/types.ts)
+Source: [`packages/chat/chat-group/src/types.ts:69`](../packages/chat/chat-group/src/types.ts)
 
 <a id="groupuser-message--log-only"></a>
 
@@ -450,7 +475,7 @@ Source: [`packages/chat/chat-group/src/types.ts:55`](../packages/chat/chat-group
 'group/user-message': { readonly text: string; readonly senderName: string }
 ```
 
-Source: [`packages/chat/chat-group/src/types.ts:53`](../packages/chat/chat-group/src/types.ts)
+Source: [`packages/chat/chat-group/src/types.ts:67`](../packages/chat/chat-group/src/types.ts)
 
 ### `hook/*`
 
