@@ -95,8 +95,14 @@ export function toCreatedMessage(row: ChatMessageRow, target: BridgeTarget): Rec
  */
 const promptCountCache = new WeakMap<Session, { length: number; count: number }>()
 
-/** Number of visible user prompts recorded in the session log so far. */
-function promptSeqOf(session: Session): number {
+/**
+ * Number of visible user prompts recorded in the session log so far.
+ *
+ * Exported so `/send` can tell the client which prompt index its message will
+ * occupy *before* the driver writes the `user/message` event — the front end
+ * needs that index to reserve a loading bubble in the right slot.
+ */
+export function promptSeqOf(session: Session): number {
   const cached = promptCountCache.get(session)
   let start = 0
   let count = 0
@@ -192,6 +198,9 @@ export function translateSessionEvent(session: Session, event: SessionEvent, tar
           delta: chunk.text,
           reasoning: chunk.type === 'reasoning-delta',
           done: false,
+          // promptSeq 用于前端把 draft 紧跟到对应的用户消息后（按 N
+          // 索引而不是 id 配对，规避前后端 id 命名空间不同步的问题）
+          promptSeq: promptSeqOf(session),
         })
       } else if (chunk.type === 'tool-call-delta') {
         // 携带 conversationId/botId 与 chunk.name（首个 delta 通常带工具名），

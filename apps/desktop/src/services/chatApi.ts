@@ -1,6 +1,6 @@
 import type { Bot, BotInput, BotMemory, Conversation, Message, MessageAttachment, ModelConfig, ModelInput, UpdateConversationInput } from '../types'
 import { transport, type IpcTransport } from './ipc'
-import { dshBaseUrl } from './transport/dsh'
+import { dshFetch } from './transport/dsh'
 
 /** 一页历史消息 + 是否还有更早的记录 */
 export interface MessagePage {
@@ -167,8 +167,14 @@ export class ChatApi {
   createPrivateConversation(botId: string): Promise<Conversation> {
     return this.t.request('conversation.createPrivate', { botId })
   }
-  createGroupConversation(name: string, botIds: string[], introduction = ''): Promise<Conversation> {
-    return this.t.request('conversation.createGroup', { name, botIds, introduction })
+  createGroupConversation(
+    name: string,
+    botIds: string[],
+    introduction = '',
+    /** 群聊共享工作目录；留空由后端分配默认目录 */
+    workspaceDir?: string,
+  ): Promise<Conversation> {
+    return this.t.request('conversation.createGroup', { name, botIds, introduction, workspaceDir })
   }
   listGroupMembers(conversationId: string): Promise<Bot[]> {
     return this.t.request('conversation.members', { id: conversationId })
@@ -251,36 +257,55 @@ export class ChatApi {
     body: Record<string, unknown>,
     onDelta: (delta: string) => void,
   ): Promise<{ content: string }> {
-    const res = await fetch(`${dshBaseUrl()}/chatapi/persona/generate`, {
+    // 必须走 dshFetch（Tauri 内用 plugin-http）而不是原生 fetch：
+    // WebView 自身的 CORS 策略会拒绝从 asset:// / dev server 跨源请求
+    // http://127.0.0.1:3180，表现为 WKWebView 的 "Load failed" —— 而
+    // `http:default` 能力只授权 plugin-http，管不到原生 fetch。
+    const res = await dshFetch('/chatapi/persona/generate', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify(body),
     })
-    if (!res.ok || res.body === null) {
+    if (!res.ok) {
       const detail = await res.text().catch(() => '')
       throw new Error(detail === '' ? `生成失败 (HTTP ${String(res.status)})` : detail)
     }
 
-    const reader = res.body.getReader()
-    const decoder = new TextDecoder()
-    let buffer = ''
     let content = ''
-    for (;;) {
-      const { done, value } = await reader.read()
-      if (done) break
-      buffer += decoder.decode(value, { stream: true })
-      let boundary = buffer.indexOf('\n\n')
-      while (boundary >= 0) {
-        const payload = buffer.slice(0, boundary).replace(/^data: /, '').trim()
-        buffer = buffer.slice(boundary + 2)
-        boundary = buffer.indexOf('\n\n')
-        if (payload === '') continue
-        const frame = JSON.parse(payload) as { delta?: string; done?: boolean; content?: string; error?: string }
-        if (typeof frame.error === 'string') throw new Error(frame.error)
-        if (typeof frame.delta === 'string') onDelta(frame.delta)
-        else if (frame.done === true) content = frame.content ?? ''
-      }
+    /** Parse one SSE payload and fold it into the running result. */
+    const consume = (payload: string): void => {
+      if (payload === '') return
+      const frame = JSON.parse(payload) as { delta?: string; done?: boolean; content?: string; error?: string }
+      if (typeof frame.error === 'string') throw new Error(frame.error)
+      if (typeof frame.delta === 'string') onDelta(frame.delta)
+      else if (frame.done === true) content = frame.content ?? ''
     }
+
+    // 流式优先：逐块读取，字段随模型输出实时填充。
+    if (res.body !== null && typeof res.body.getReader === 'function') {
+      const reader = res.body.getReader()
+      const decoder = new TextDecoder()
+      let buffer = ''
+      for (;;) {
+        const { done, value } = await reader.read()
+        if (done) break
+        buffer += decoder.decode(value, { stream: true })
+        // SSE 帧以 \n\n 结尾；兼容 \r\n\r\n 换行（服务端实际输出 \r\n\r\n）
+        let boundary = buffer.indexOf('\n\n')
+        while (boundary >= 0) {
+          const raw = buffer.slice(0, boundary)
+          buffer = buffer.slice(boundary + 2)
+          boundary = buffer.indexOf('\n\n')
+          consume(raw.replace(/^data: /, '').trim())
+        }
+      }
+      return { content }
+    }
+
+    // 兜底：拿不到流（plugin-http 缓冲了整个响应）时一次性解析，
+    // 牺牲实时填充，但保证功能可用而不是报错。
+    const text = await res.text()
+    for (const chunk of text.split('\n\n')) consume(chunk.replace(/^data: /, '').trim())
     return { content }
   }
 

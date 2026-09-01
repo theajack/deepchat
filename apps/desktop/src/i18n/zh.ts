@@ -82,6 +82,7 @@ export const zh: MessageDict = {
   'common.delete': '删除',
   'common.saved': '已保存',
   'common.saveFailed': '保存失败',
+  'common.readOnly': '不可修改',
 
   // 聊天
   'chat.empty.title': '选择一个会话开始对话',
@@ -275,7 +276,9 @@ export const zh: MessageDict = {
   'bot.workspaceDir': '工作目录',
   'bot.workspaceDirPlaceholder': '留空则使用默认目录',
   'bot.workspaceDirHint': '该好友的文件与长期记忆存放位置，修改后立即生效。留空则使用默认目录。',
+  'bot.workspaceDirLockedHint': '该好友的文件与长期记忆存放位置。创建后不可修改——改指向会让已有的记忆与文件脱离该好友。',
   'bot.workspaceDirBrowse': '选择目录',
+  'bot.workspaceDirOpen': '打开目录',
   'bot.workspaceDirClear': '清除',
   'bot.generateFailed': '生成失败：{msg}',
 
@@ -290,6 +293,12 @@ export const zh: MessageDict = {
   'group.generatingIntro': '生成中…',
   'group.generateIntroFailed': '生成失败：{msg}',
   'group.fillNameFirst': '请先填写群名称',
+  'group.workspaceDir': '群聊共享工作目录',
+  'group.workspaceDirPlaceholder': '留空则使用默认目录',
+  'group.workspaceDirBrowse': '选择目录',
+  'group.workspaceDirOpen': '打开目录',
+  'group.workspaceDirHint': '全组成员共用的目录，成员可选择把内容写在这里或各自的私人工作区。留空则使用默认目录。',
+  'group.workspaceDirLockedHint': '全组成员共用的目录，成员可选择把内容写在这里或各自的私人工作区。创建后不可修改——改指向会让群里已产出的文件脱离该群。',
   'group.selectMembers': '选择 AI 好友（至少 1 位）',
   'group.notEnough': 'AI 好友不足，请先到「AI 好友」页创建',
   'group.create': '创建群聊',

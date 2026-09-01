@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
-import { Cpu, Search, Sparkles, X } from "lucide-vue-next";
+import { Cpu, FolderOpen, Search, Sparkles, X } from "lucide-vue-next";
 import Avatar from "../common/Avatar.vue";
 import BotAgentBadge from "./BotAgentBadge.vue";
 import { useAppStore } from "../../stores/app";
@@ -9,6 +9,7 @@ import { useConversationsStore } from "../../stores/conversations";
 import { useModelsStore } from "../../stores/models";
 import { useSelfStore } from "../../stores/self";
 import { chatApi } from "../../services/chatApi";
+import { agentApi } from "../../services/agentApi";
 import type { Conversation, Bot } from "../../types";
 import { t } from "../../i18n";
 
@@ -26,6 +27,8 @@ const isEdit = computed(() => props.group != null);
 const name = ref("");
 const intro = ref("");
 const selected = ref<Set<string>>(new Set());
+/** 群聊共享工作目录：留空则由后端分配默认目录；创建后不可修改 */
+const workspaceDir = ref("");
 /** 生成群聊介绍进行中（流式填充期间禁用输入框） */
 const generating = ref(false);
 /** 好友搜索关键字（按名称/模型名过滤；已选中的始终显示） */
@@ -55,6 +58,8 @@ watch(
   async (g) => {
     name.value = g?.name ?? "";
     intro.value = g?.introduction ?? "";
+    // 编辑时回填已有目录（只读展示）；新建时清空
+    workspaceDir.value = g?.workspace_dir ?? "";
     selected.value = new Set();
     if (g) {
       const members = conversations.membersMap[g.id]?.map((b) => b.id) ?? [];
@@ -71,6 +76,37 @@ watch(
   },
   { immediate: true },
 );
+
+/**
+ * 选择群聊共享工作目录。
+ * 仅在新建时可用——创建后 agent 沙箱与已产出文件都锚定在该目录，改指向会
+ * 让它们脱离群聊。
+ */
+async function pickWorkspaceDir() {
+  if (isEdit.value) return;
+  try {
+    // 未填时从后端默认工作区根出发，省得每次从根目录翻
+    const start =
+      workspaceDir.value.trim() !== ""
+        ? workspaceDir.value
+        : await chatApi.getDefaultWorkspaceDir().catch(() => undefined);
+    const picked = await agentApi.pickDir(start);
+    if (picked) workspaceDir.value = picked;
+  } catch (e) {
+    app.toast(e instanceof Error ? e.message : String(e));
+  }
+}
+
+/** 用系统默认程序打开群聊共享工作目录 */
+async function openWorkspaceDir() {
+  const dir = workspaceDir.value.trim();
+  if (!dir) return;
+  try {
+    await agentApi.toolOpenDir(dir);
+  } catch {
+    app.toast(t("dataDir.openFailed"));
+  }
+}
 
 function toggle(id: string) {
   const next = new Set(selected.value);
@@ -123,9 +159,15 @@ async function create() {
     return;
   }
   try {
-    const conv = await conversations.createGroup(name.value.trim(), [...selected.value], intro.value.trim());
+    const conv = await conversations.createGroup(
+      name.value.trim(),
+      [...selected.value],
+      intro.value.trim(),
+      workspaceDir.value.trim() || undefined,
+    );
     name.value = "";
     intro.value = "";
+    workspaceDir.value = "";
     selected.value = new Set();
     emit("created", conv.id);
   } catch (e) {
@@ -179,6 +221,47 @@ async function save() {
       </div>
       <textarea v-model="intro" rows="3" :placeholder="t('contacts.introPlaceholder')" :disabled="generating"
         class="w-full resize-none rounded-lg border border-line bg-ink-2/70 px-3 py-2 text-[13px] leading-relaxed text-hi outline-none transition-all placeholder:text-lo focus:border-accent/45 focus:shadow-[0_0_0_3px_var(--color-accent-soft)] disabled:opacity-50"></textarea>
+    </div>
+    <!-- 群聊共享工作目录：新建时可选，创建后只读 + 可打开 -->
+    <div>
+      <label class="mb-1.5 flex items-center gap-1.5 text-xs text-mid">
+        {{ t("group.workspaceDir") }}
+        <span v-if="isEdit" class="rounded border border-line px-1 py-px text-[10px] text-lo">{{ t("common.readOnly") }}</span>
+      </label>
+      <div class="flex items-center gap-2">
+        <input
+          :value="workspaceDir"
+          type="text"
+          readonly
+          :placeholder="t('group.workspaceDirPlaceholder')"
+          :class="isEdit ? 'cursor-not-allowed opacity-60' : 'cursor-pointer hover:border-accent/45'"
+          class="min-w-0 flex-1 truncate rounded-lg border border-line bg-ink-2/70 px-3 py-2 font-mono text-[12px] text-hi outline-none transition-all placeholder:text-lo focus:border-accent/45"
+          @click="pickWorkspaceDir"
+        />
+        <button
+          v-if="!isEdit"
+          type="button"
+          class="flex shrink-0 cursor-pointer items-center gap-1.5 rounded-lg border border-line bg-ink-2 px-3 py-2 text-[12px] text-mid transition-colors hover:border-accent/45 hover:text-accent"
+          @click="pickWorkspaceDir"
+        >
+          <FolderOpen :size="13" />
+          {{ t("group.workspaceDirBrowse") }}
+        </button>
+        <button
+          v-if="isEdit"
+          type="button"
+          class="flex shrink-0 cursor-pointer items-center gap-1.5 rounded-lg border border-line bg-ink-2 px-3 py-2 text-[12px] text-mid transition-colors hover:border-accent/45 hover:text-accent disabled:cursor-not-allowed disabled:opacity-40"
+          :disabled="!workspaceDir.trim()"
+          :title="t('group.workspaceDirOpen')"
+          @click="openWorkspaceDir"
+        >
+          <FolderOpen :size="13" />
+          {{ t("group.workspaceDirOpen") }}
+        </button>
+      </div>
+      <p class="mt-1.5 text-[11px] leading-relaxed text-lo">
+        {{ isEdit ? t("group.workspaceDirLockedHint") : t("group.workspaceDirHint") }}
+      </p>
     </div>
     <div>
       <label class="mb-1.5 block text-xs text-mid">{{ t("group.selectMembers") }}</label>

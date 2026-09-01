@@ -99,8 +99,14 @@ export const useConversationsStore = defineStore('conversations', () => {
     return conv
   }
 
-  async function createGroup(name: string, botIds: string[], introduction = ''): Promise<Conversation> {
-    const conv = await chatApi.createGroupConversation(name, botIds, introduction)
+  /** @param workspaceDir 群聊共享工作目录；留空由后端分配默认目录（创建后不可改） */
+  async function createGroup(
+    name: string,
+    botIds: string[],
+    introduction = '',
+    workspaceDir?: string,
+  ): Promise<Conversation> {
+    const conv = await chatApi.createGroupConversation(name, botIds, introduction, workspaceDir)
     upsert(conv)
     return conv
   }
@@ -175,8 +181,16 @@ export const useConversationsStore = defineStore('conversations', () => {
     sortItems()
   }
 
-  /** 好友头像变更后，同步群聊成员缓存中对应的 bot（保证九宫格即时刷新） */
+  /**
+   * 好友资料变更后，把新数据同步到两处缓存（保证界面即时刷新）。
+   *
+   * 只做群聊成员是不够的：会话列表标题与 ChatHeader 读的是 `conv.name`
+   * —— 它是会话列表加载时从 bot 拷过来的**快照**。不同步就会出现
+   * "头像变了（头像实时从 bots store 读）但名字没变"的割裂状态，
+   * 必须重新拉取会话列表才恢复。
+   */
   function syncMemberBot(bot: Bot) {
+    // 1) 群聊九宫格成员（头像 / 名称 / Agent 角标）
     const next = { ...membersMap.value }
     let changed = false
     for (const id of Object.keys(next)) {
@@ -188,6 +202,12 @@ export const useConversationsStore = defineStore('conversations', () => {
       }
     }
     if (changed) membersMap.value = next
+
+    // 2) 私聊会话的快照（id 格式 `private:{botId}`）
+    const convId = `private:${bot.id}`
+    if (!items.value.some(c => c.id === convId)) return
+    items.value = items.value.map(c =>
+      c.id === convId ? { ...c, name: bot.name, avatar: bot.avatar ?? c.avatar } : c)
   }
 
   /** CLI 事件：conversation.updated */

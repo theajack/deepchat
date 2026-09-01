@@ -14,6 +14,14 @@ import Spinner from "../common/Spinner.vue";
 const TIME_GAP = 5 * 60 * 1000;
 /** 距顶部小于此值即触发向上翻页（px） */
 const PRELOAD_OFFSET = 120;
+/**
+ * loading 占位气泡的最长存活时间。
+ *
+ * 正常流程下占位会在首个 delta 到达时被接管并删除；这个 TTL 只是兜底——
+ * 长会话分页会让前端估算的 promptSeq 与服务端错位，占位等不到接管，
+ * 没有 TTL 就会一直转圈。
+ */
+const PLACEHOLDER_TTL_MS = 60_000;
 
 type Row =
   | { type: "time"; key: string; text: string }
@@ -121,8 +129,8 @@ const rows = computed<Row[]>(() => {
     botId: string
     content: string
     segments: StreamSegment[]
-    /** 触发该回复的用户消息 id（store 中挂起消费所得），用于排序 */
-    anchorMsgId?: string
+    /** 该草稿对应的 user message 序号（1-based）；渲染按此把草稿紧跟用户消息 */
+    promptIndex: number
     createdAt: number
   }
   type PersistedRow = {
@@ -131,13 +139,38 @@ const rows = computed<Row[]>(() => {
   }
   type Source = StreamRow | PersistedRow
 
-  // 先把草稿按锚点分组，再构造 sources：**每条用户消息后面紧跟它的草稿**。
-  // 配合 ES2019+ 保证的稳定排序，即便虚拟时间完全相同（用户在 1ms 内连发
-  // 两条），相等项也保持这里的插入顺序 —— 消息在前、它的回复在后。
-  const draftsByAnchor = new Map<string, StreamRow[]>()
+  // 草稿按"prompt 序号"配对到对应的 user msg：后端 message.stream 帧携带
+  // promptSeq（与 session 内 user message 数严格对应），渲染时把草稿
+  // 紧跟到 byConv 里第 promptSeq 个用户消息之后——不再依赖 id 命名空间
+  // 匹配（前端占位用 crypto.randomUUID、后端 stream 用 m-p{N}，两侧根本
+  // 没共享 id 体系）。
+  const draftsByIndex = new Map<number, StreamRow[]>()
   const orphanDrafts: StreamRow[] = []
   for (const draft of Object.values(messages.streams)) {
     if (draft.conversationId !== convId) continue
+    // 兜底：loading 占位迟迟等不到真实 delta 来接管（长会话分页会让前端
+    // 估算的 promptSeq 与服务端错位），超时的占位直接不渲染，免得永久转圈。
+    if (draft.placeholder === true && Date.now() - draft.createdAt > PLACEHOLDER_TTL_MS) continue
+    // 优先用后端显式携带的 promptSeq；缺省时回退到 draftId 'm-p{N}' 解析
+    let idx: number | undefined = draft.promptSeq
+    if (idx === undefined || Number.isNaN(idx)) {
+      const m = /^m-p(\d+)$/.exec(draft.draftId)
+      if (m !== null) idx = Number(m[1])
+    }
+    if (idx === undefined || Number.isNaN(idx)) {
+      // 历史/群聊等没有标准命名的草稿 → 放最后（不丢）
+      orphanDrafts.push({
+        kind: "stream",
+        draftId: draft.draftId,
+        conversationId: draft.conversationId,
+        botId: draft.botId,
+        content: draft.content,
+        segments: draft.segments,
+        promptIndex: Number.MAX_SAFE_INTEGER,
+        createdAt: draft.createdAt,
+      })
+      continue
+    }
     const row: StreamRow = {
       kind: "stream",
       draftId: draft.draftId,
@@ -145,40 +178,29 @@ const rows = computed<Row[]>(() => {
       botId: draft.botId,
       content: draft.content,
       segments: draft.segments,
-      anchorMsgId: draft.anchorMsgId,
+      promptIndex: idx,
       createdAt: draft.createdAt,
     }
-    const anchor = draft.anchorMsgId
-    if (anchor === undefined) {
-      orphanDrafts.push(row)
-      continue
-    }
-    const bucket = draftsByAnchor.get(anchor)
-    if (bucket === undefined) draftsByAnchor.set(anchor, [row])
+    const bucket = draftsByIndex.get(idx)
+    if (bucket === undefined) draftsByIndex.set(idx, [row])
     else bucket.push(row)
   }
 
+  // 给 byConv 里每条 is_self=1 消息算 prompt 序号（1-based，与后端同步）
   const sources: Source[] = []
+  let userIdx = 0
   for (const m of list) {
     sources.push({ kind: "msg", msg: m })
-    for (const d of draftsByAnchor.get(m.id) ?? []) sources.push(d)
+    if (m.is_self === 1) {
+      userIdx += 1
+      for (const d of draftsByIndex.get(userIdx) ?? []) sources.push(d)
+    }
   }
-  // 没有锚点的草稿放最后（历史消息 / 群聊调度等场景），不至于丢失
   for (const d of orphanDrafts) sources.push(d)
 
-  // 虚拟时间：用户消息用 created_at；草稿用其锚点消息的 created_at（相等时
-  // 靠上面的插入顺序 + 稳定排序保证 "消息 → 它的回复"）。无锚点回退 createdAt。
-  const msgById = new Map<string, number>()
-  for (const m of list) msgById.set(m.id, m.created_at)
-  const virtualTime = (src: Source): number => {
-    if (src.kind === "msg") return src.msg.created_at
-    if (src.anchorMsgId !== undefined) {
-      const anchor = msgById.get(src.anchorMsgId)
-      if (anchor !== undefined) return anchor
-    }
-    return src.createdAt
-  }
-  sources.sort((a, b) => virtualTime(a) - virtualTime(b))
+  // 顺序已由上方构造保证（用户消息 → 它的草稿 → 下一条用户消息 → ...），
+  // 无需再排序。保留显式 push 确保 ES2019+ 的稳定顺序在跨分支合并时也成立。
+  void sources
 
   const result: Row[] = []
   let lastRenderedTime: number | null = null

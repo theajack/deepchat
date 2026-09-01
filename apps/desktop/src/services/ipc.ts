@@ -59,6 +59,8 @@ interface DshGroup {
   avatar?: string
   memberBotIds: string[]
   sessionId: string
+  /** 群聊共享工作目录（后端创建时分配或用户指定） */
+  workspaceDir?: string
   createdAt: number
   updatedAt: number
 }
@@ -428,6 +430,7 @@ export class DshTransport implements IpcTransport {
           last_message_at: hit.at ?? group.updatedAt,
           unread_count: 0,
           created_at: group.createdAt,
+          workspace_dir: group.workspaceDir ?? null,
         }
       })
       return [...groupList, ...privates] as T
@@ -449,9 +452,14 @@ export class DshTransport implements IpcTransport {
       } as T
     }
     if (method === 'conversation.createGroup') {
+      // 群聊共享工作目录：留空则由后端分配默认目录
+      const groupWorkspaceDir = typeof params.workspaceDir === 'string' && params.workspaceDir.trim() !== ''
+        ? params.workspaceDir.trim()
+        : undefined
       const group = await dshSend<DshGroup>('POST', '/chatapi/groups', {
         name: params.name,
         memberBotIds: params.botIds,
+        ...(groupWorkspaceDir !== undefined ? { workspaceDir: groupWorkspaceDir } : {}),
       })
       return {
         id: group.id,
@@ -463,6 +471,7 @@ export class DshTransport implements IpcTransport {
         last_message_at: group.createdAt,
         unread_count: 0,
         created_at: group.createdAt,
+        workspace_dir: group.workspaceDir ?? null,
       } as T
     }
     if (method === 'conversation.members') {
@@ -493,6 +502,7 @@ export class DshTransport implements IpcTransport {
         last_message_at: group.updatedAt,
         unread_count: 0,
         created_at: group.createdAt,
+        workspace_dir: group.workspaceDir ?? null,
       } as T
     }
     if (method === 'conversation.markRead') return undefined as T
@@ -540,12 +550,19 @@ export class DshTransport implements IpcTransport {
           size: Number((a as { size?: unknown }).size ?? 0),
           ref: String((a as { ref?: unknown }).ref),
         }))
+      // 私聊：后端回本次消息将占用的 promptSeq，用于给 loading 占位气泡定位。
+      // 群聊走调度模型、回复由 bot.typing 驱动，没有 m-p{N} 概念，故为 undefined。
+      let promptSeq: number | undefined
       if (conversationId.startsWith('private:')) {
-        await dshSend('POST', `/chatapi/bots/${botIdOfPrivate(conversationId)}/send`, {
-          content,
-          ...(images.length > 0 ? { images } : {}),
-          ...(fileAttachments.length > 0 ? { attachments: fileAttachments } : {}),
-        })
+        const ack = await dshSend<{ accepted?: boolean; promptSeq?: unknown }>(
+          'POST', `/chatapi/bots/${botIdOfPrivate(conversationId)}/send`, {
+            content,
+            ...(images.length > 0 ? { images } : {}),
+            ...(fileAttachments.length > 0 ? { attachments: fileAttachments } : {}),
+          })
+        if (ack !== null && typeof ack === 'object' && typeof ack.promptSeq === 'number') {
+          promptSeq = ack.promptSeq
+        }
       } else {
         await dshSend('POST', `/chatapi/groups/${conversationId}/send`, { content, senderName: 'me' })
       }
@@ -562,6 +579,7 @@ export class DshTransport implements IpcTransport {
         // 本地即时展示：图片沿用内联 dataUrl，文件沿用已上传的相对路径。
         // 刷新后改由历史接口返回同样的元信息，因此气泡里看到的是同一套附件。
         ...(attachments.length > 0 ? { attachments } : {}),
+        ...(promptSeq !== undefined ? { promptSeq } : {}),
       } as T
     }
     if (method === 'message.stop') {

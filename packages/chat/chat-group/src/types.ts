@@ -18,7 +18,15 @@ export interface GroupRecord {
   readonly memberBotIds: readonly string[]
   /** The group container session: the shared message log the UI renders. */
   readonly sessionId: SessionId
-  /** Fixed group workspace: $DSH_HOME/workspace/groups/{uid}. */
+  /**
+   * Shared group workspace — `$DSH_HOME/workspace/groups/{uid}` by default, or
+   * a user-chosen directory.
+   *
+   * Members may use this shared area or their own private workspace; both are
+   * announced in the per-turn context so the model can pick. It is fixed at
+   * creation time: the container agent's cwd and any files the group produced
+   * are anchored to it, so repointing later would orphan them.
+   */
   readonly workspaceDir?: string | undefined
   readonly createdAt: number
   readonly updatedAt: number
@@ -28,9 +36,19 @@ export interface GroupRecord {
 export type GroupCreateInput = Pick<GroupRecord, 'name'> & {
   readonly avatar?: string | undefined
   readonly memberBotIds?: readonly string[] | undefined
+  /**
+   * Optional shared workspace. Omitted (or blank) falls back to
+   * `$DSH_HOME/workspace/groups/{uid}`.
+   */
+  readonly workspaceDir?: string | undefined
 }
 
-/** Patch accepted by group update. */
+/**
+ * Patch accepted by group update.
+ *
+ * `workspaceDir` is deliberately absent — creation-time only, for the reason
+ * documented on {@link GroupRecord.workspaceDir}.
+ */
 export type GroupUpdatePatch = Partial<Pick<GroupRecord, 'name' | 'avatar' | 'memberBotIds'>>
 
 /** One rendered chat row served by `history()`. */

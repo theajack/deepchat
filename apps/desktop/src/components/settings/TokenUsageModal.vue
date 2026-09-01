@@ -10,6 +10,7 @@ import { BarChart3, X } from "lucide-vue-next";
 import { chatApi, type TokenUsageReport } from "../../services/chatApi";
 import TokenBarChart from "../charts/TokenBarChart.vue";
 import TokenLineChart from "../charts/TokenLineChart.vue";
+import Select from "../common/Select.vue";
 import { t } from "../../i18n";
 
 const emit = defineEmits<{ close: [] }>();
@@ -81,6 +82,22 @@ function dayLabel(date: string): string {
   const [, m, d] = date.split("-");
   return `${m}/${d}`;
 }
+
+/**
+ * 折线图模型下拉选项。
+ *
+ * hint 放该模型的累计消耗而不是模型 ID：label 已经是「模型名 → ID」的回落
+ * 结果，再补 ID 会重复；而这是消耗弹窗，总量既能区分同名条目、又能直接
+ * 看出谁是消耗大户。
+ */
+const modelOptions = computed(() => [
+  { label: t("tokenUsage.allModels"), value: ALL, hint: compact(grand.value.totalTokens) },
+  ...(report.value?.models ?? []).map((m) => ({
+    label: m.modelName || m.modelId,
+    value: m.modelId,
+    hint: compact(m.totalTokens),
+  })),
+]);
 </script>
 
 <template>
@@ -150,16 +167,14 @@ function dayLabel(date: string): string {
           <!-- 近 7 天趋势（折线图） -->
           <section>
             <div class="mb-2.5 flex items-center justify-between gap-3">
-              <h4 class="text-[12px] font-medium text-mid">{{ t("tokenUsage.trend7d") }}</h4>
-              <select
+              <h4 class="shrink-0 text-[12px] font-medium text-mid">{{ t("tokenUsage.trend7d") }}</h4>
+              <Select
                 v-model="selected"
-                class="max-w-45 cursor-pointer rounded-lg border bg-ink-2 px-2 py-1 text-[11px] text-mid outline-none transition-colors focus:border-accent/45"
-              >
-                <option :value="ALL">{{ t("tokenUsage.allModels") }}</option>
-                <option v-for="m in report?.models ?? []" :key="m.modelId" :value="m.modelId">
-                  {{ m.modelName || m.modelId }}
-                </option>
-              </select>
+                width-class="w-45"
+                height-class="h-[30px]"
+                text-class="text-[11.5px]"
+                :options="modelOptions"
+              />
             </div>
             <div class="rounded-xl border border-line bg-ink-2/40 px-3.5 py-3">
               <TokenLineChart

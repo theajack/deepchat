@@ -82,6 +82,7 @@ export const en: MessageDict = {
   'common.delete': 'Delete',
   'common.saved': 'Saved',
   'common.saveFailed': 'Failed to save',
+  'common.readOnly': 'Read only',
 
   // Chat
   'chat.empty.title': 'Select a conversation to start chatting',
@@ -275,7 +276,9 @@ export const en: MessageDict = {
   'bot.workspaceDir': 'Workspace directory',
   'bot.workspaceDirPlaceholder': 'Leave empty to use the default directory',
   'bot.workspaceDirHint': "Where this friend's files and long-term memory live. Takes effect immediately after saving. Leave empty to use the default directory.",
+  'bot.workspaceDirLockedHint': "Where this friend's files and long-term memory live. It cannot be changed after creation — repointing it would orphan the memories and files already belonging to this friend.",
   'bot.workspaceDirBrowse': 'Browse',
+  'bot.workspaceDirOpen': 'Open folder',
   'bot.workspaceDirClear': 'Clear',
   'bot.generateFailed': 'Generation failed: {msg}',
 
@@ -290,6 +293,12 @@ export const en: MessageDict = {
   'group.generatingIntro': 'Generating…',
   'group.generateIntroFailed': 'Generation failed: {msg}',
   'group.fillNameFirst': 'Please enter the group name first',
+  'group.workspaceDir': 'Shared group workspace',
+  'group.workspaceDirPlaceholder': 'Leave empty to use the default directory',
+  'group.workspaceDirBrowse': 'Browse',
+  'group.workspaceDirOpen': 'Open folder',
+  'group.workspaceDirHint': 'A directory shared by all members. Each member may write here or into its own private workspace. Leave empty to use the default directory.',
+  'group.workspaceDirLockedHint': 'A directory shared by all members. Each member may write here or into its own private workspace. It cannot be changed after creation — repointing it would orphan files the group already produced.',
   'group.selectMembers': 'Select AI friends (at least 1)',
   'group.notEnough': 'Not enough AI friends. Create some in the AI Friends page first',
   'group.create': 'Create group',

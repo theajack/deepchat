@@ -451,8 +451,11 @@ export class ChatGroup extends Service {
   async create(input: GroupCreateInput): Promise<GroupRecord> {
     const now = Date.now()
     const id = `group-${randomUUID()}`
-    // 每个群固定工作目录：$DSH_HOME/workspace/groups/{uid}
-    const workspaceDir = join(resolveDshHome(), 'workspace', 'groups', id)
+    // 群工作目录：用户指定优先，否则用 $DSH_HOME/workspace/groups/{uid}
+    const requested = input.workspaceDir?.trim()
+    const workspaceDir = requested !== undefined && requested !== ''
+      ? requested
+      : join(resolveDshHome(), 'workspace', 'groups', id)
     const record: GroupRecord = {
       name: input.name,
       avatar: input.avatar,
@@ -463,6 +466,8 @@ export class ChatGroup extends Service {
       createdAt: now,
       updatedAt: now,
     }
+    // 必须真实存在：agent 的沙箱 cwd 与文件工具都以它为根，指向不存在的
+    // 路径会让成员一开口就报错。
     await mkdir(workspaceDir, { recursive: true })
     await this.store.table('groups').put(record.id, record)
     return record
@@ -847,7 +852,12 @@ export class ChatGroup extends Service {
       await traceGroup(`speak(${bot.id}): ensureBotAgent THREW ${e instanceof Error ? e.message : String(e)}`)
       throw e
     }
-    const context = renderGroupContext(container.session, this.config.contextWindow ?? DEFAULT_CONTEXT_WINDOW)
+    const context = renderGroupContext(
+      container.session,
+      this.config.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
+      // 告知成员可用的工作区：群共享目录 + 自己的私有目录，由它按任务自选
+      { groupWorkspaceDir: group.workspaceDir, selfWorkspaceDir: bot.workspaceDir },
+    )
 
     // Hidden durable context: the rendered group transcript (relay form).
     agent.inject(createUserMessage({
@@ -1129,6 +1139,10 @@ export class ChatGroup extends Service {
                 memberBotIds: Array.isArray(body.memberBotIds)
                   ? body.memberBotIds.filter((v): v is string => typeof v === 'string')
                   : undefined,
+                // 前端按 snake_case 发 workspace_dir，驼峰也一并接受
+                workspaceDir: typeof body.workspaceDir === 'string'
+                  ? body.workspaceDir
+                  : typeof body.workspace_dir === 'string' ? body.workspace_dir : undefined,
               })
               return json(res, 200, group)
             }
@@ -1232,10 +1246,38 @@ function renderTranscript(session: Session, window: number): string {
   return rows.slice(-window).join('\n')
 }
 
-function renderGroupContext(session: Session, window: number): string {
+/**
+ * Render the per-turn context handed to a member before it speaks.
+ *
+ * @param workspaces - Directories the member may use, announced so it can pick
+ * rather than guess: the group's shared area (for artefacts everyone should
+ * see) versus its own private workspace (for personal notes or drafts).
+ */
+function renderGroupContext(
+  session: Session,
+  window: number,
+  workspaces: { readonly groupWorkspaceDir?: string | undefined; readonly selfWorkspaceDir?: string | undefined } = {},
+): string {
+  const dirs: string[] = []
+  if (workspaces.groupWorkspaceDir !== undefined && workspaces.groupWorkspaceDir !== '') {
+    dirs.push(`- 群聊共享工作区：${workspaces.groupWorkspaceDir}（全组成员共用，写在这里的文件其他成员也能看到）`)
+  }
+  if (workspaces.selfWorkspaceDir !== undefined && workspaces.selfWorkspaceDir !== '') {
+    dirs.push(`- 你的私人工作区：${workspaces.selfWorkspaceDir}（只有你能访问，适合放个人草稿与私人记忆）`)
+  }
+  const workspaceSection = dirs.length === 0
+    ? []
+    : [
+      '',
+      '## 可用的工作目录',
+      ...dirs,
+      '按当前任务自行选择：需要分享给群里其他成员的内容写到共享工作区，属于你自己的内容写到私人工作区。',
+      '你的文件工具默认在你的私人工作区；要写入共享工作区请使用上面的绝对路径。',
+    ]
   return [
     '以下是群里最近的聊天记录（最后一条是最新消息）：',
     renderTranscript(session, window),
+    ...workspaceSection,
     '请以你的身份参与这个群聊。',
   ].join('\n')
 }

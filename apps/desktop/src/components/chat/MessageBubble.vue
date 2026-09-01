@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from "vue";
-import { Brain, Check, ChevronDown, ChevronRight, Copy, FileText } from "lucide-vue-next";
+import { Brain, Check, ChevronDown, ChevronRight, Copy, FileSpreadsheet, FileType, File as FileIcon, Paperclip } from "lucide-vue-next";
 import Avatar from "../common/Avatar.vue";
 import HoverTip from "../common/HoverTip.vue";
 import ImageLightbox from "../common/ImageLightbox.vue";
@@ -370,6 +370,15 @@ function formatSize(bytes: number): string {
   return `${(bytes / 1024 / 1024).toFixed(1)}MB`;
 }
 
+/** 按文件名挑最贴切的图标 — 避免 FileText 在小尺寸下被误认为"?" */
+function iconFor(att: { name: string; mediaType?: string }): "sheet" | "doc" | "slide" | "file" {
+  const lower = att.name.toLowerCase()
+  if (lower.endsWith(".xlsx") || lower.endsWith(".xls") || lower.endsWith(".csv")) return "sheet"
+  if (lower.endsWith(".docx") || lower.endsWith(".doc") || lower.endsWith(".pdf")) return "doc"
+  if (lower.endsWith(".pptx") || lower.endsWith(".ppt")) return "slide"
+  return "file"
+}
+
 /** 时长格式化：毫秒 → "3.2s" / "<1s" */
 function formatDuration(ms: number): string {
   if (ms <= 0) return "";
@@ -618,7 +627,11 @@ const usageText = computed(() => {
               @click="openAttachment(att)"
             >
               <span class="flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-accent/15 text-accent transition-colors group-hover/att:bg-accent/25">
-                <FileText :size="13" />
+                <!-- 按扩展名挑最贴切的图标，避免 FileText 在小尺寸下被误认为"?" -->
+                <FileSpreadsheet v-if="iconFor(att) === 'sheet'" :size="13" />
+                <FileType v-else-if="iconFor(att) === 'doc'" :size="13" />
+                <FileIcon v-else-if="iconFor(att) === 'slide'" :size="13" />
+                <Paperclip v-else :size="13" />
               </span>
               <span class="truncate text-xs font-medium text-hi">{{ att.name }}</span>
               <span class="font-num shrink-0 text-[11px] text-mid">{{ formatSize(att.size) }}</span>

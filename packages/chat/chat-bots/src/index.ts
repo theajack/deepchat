@@ -86,7 +86,7 @@ export type { ChatAttachmentMeta } from './attachments.ts'
 export type { TokenUsageReport, ModelUsage, DailyUsage } from './token-usage.ts'
 import { configureDebugLog, debugLog, isDebugLogEnabled, tailDebugLog, DEBUG_LOG_PATH } from './debug-log.ts'
 import { generatePersonaText, type PersonaKind } from './persona.ts'
-import { pageRows, renderPrivateHistory, translateSessionEvent } from './bridge.ts'
+import { pageRows, promptSeqOf, renderPrivateHistory, translateSessionEvent } from './bridge.ts'
 import type { ChatMessageRow } from './bridge.ts'
 import { defineDomain, domainTable } from '@deepseek-ai/dsh-storage-domain'
 import type { Domain } from '@deepseek-ai/dsh-storage-domain'
@@ -462,9 +462,14 @@ export class ChatBots extends Service {
         const name = typeof body.name === 'string' ? body.name.trim() : ''
         if (name === '') return fail(400, 'name 不能为空')
 
-        // 模型：调用方指定优先，否则用设置里的通用处理模型（群聊调度偏好）
+        // 模型：调用方指定优先，否则走 通用处理模型 → 默认模型 → 第一个模型。
+        // 前端按 snake_case 发 `model_id`，这里同时接受驼峰与下划线两种写法
+        // （历史上只读 modelId，导致前端的指定被静默忽略）。
         const models = this.models
-        const requestedId = typeof body.modelId === 'string' && body.modelId !== '' ? body.modelId : undefined
+        const rawRequested = typeof body.modelId === 'string'
+          ? body.modelId
+          : typeof body.model_id === 'string' ? body.model_id : ''
+        const requestedId = rawRequested.trim() === '' ? undefined : rawRequested.trim()
         const record = (requestedId === undefined ? undefined : models?.get(requestedId)) ?? this.groupJudgeModel()
         if (record === undefined) return fail(400, '还没有可用模型，请先在设置里添加模型')
 
@@ -1696,13 +1701,18 @@ export class ChatBots extends Service {
             // 改为 session.append 自定义事件后，driver 完全不感知，渲染路径
             // 只看到 source.kind === 'user' 的 user/message，提示从不出现在
             // 气泡里；模型则由 systemPrompt 模板读会话 log 看到该事件内容。
+            // followup 只是入队，user/message 事件尚未写入 session —— 本次消息将
+            // 成为第 (已有 prompt 数 + 1) 个。把这个序号回给前端，它才能把
+            // loading 占位气泡精确放在这条消息之后（前端靠页面内计数在长
+            // 会话分页时算不准）。
+            const promptSeq = promptSeqOf(agent.session) + 1
             agent.followup(createUserMessage({ content, source: { kind: 'user' } }))
             if (docHint !== '') {
               // forMessageSeq 暂用 0：当前的 bridge 不消费该字段，留给后续
               // 若要把 hint 与具体消息配对的扩展点。
               appendDocumentHint(agent.session, 0, docHint)
             }
-            return json(res, 200, { accepted: true })
+            return json(res, 200, { accepted: true, promptSeq })
           }
 
           // POST /chatapi/bots/:id/stop — 终止正在生成的回复（取消当前

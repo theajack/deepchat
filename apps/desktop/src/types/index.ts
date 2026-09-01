@@ -66,6 +66,8 @@ export interface Conversation {
   last_message_at: number | null
   unread_count: number
   created_at: number
+  /** 群聊共享工作目录（仅群聊有值）；创建后不可修改 */
+  workspace_dir?: string | null
 }
 
 export interface UpdateConversationInput {
@@ -123,6 +125,12 @@ export interface Message {
   cached_tokens?: number
   /** 结束原因：'' 正常结束 | 'aborted' 用户主动终止 */
   stop_reason?: string
+  /**
+   * 发送回执携带：本次用户消息在 session 内占用的 promptSeq（仅私聊）。
+   * 前端据此把 loading 占位气泡放到这条消息之后——页面内计数在长会话
+   * 分页时算不准，必须以服务端为准。
+   */
+  promptSeq?: number
   /** 消息附件（图片 / 文件），发送时附带，历史消息由后端投影 */
   attachments?: MessageAttachment[]
   /** 后端游标（会话事件 seq），历史向上翻页时作为 before 参数 */
@@ -184,6 +192,9 @@ export interface StreamFrame {
   delta: string
   done: boolean
   reasoning?: boolean
+  /** 该 stream 对应的 user message 序号（与 session 内 promptSeqOf 一致），
+   *  用于实时把 draft 紧跟到对应用户消息下方。 */
+  promptSeq?: number
 }
 
 export interface TypingFrame {

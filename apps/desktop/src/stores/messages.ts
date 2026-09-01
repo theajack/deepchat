@@ -20,11 +20,16 @@ export interface StreamDraft {
   conversationId: string
   botId: string
   /**
-   * 触发该回复的用户消息本地 id（send 时分配）。多个用户消息连续发送时，
-   * 各自触发的草稿会消费各自挂起的锚点——渲染时把草稿排在它指向的用户
-   * 消息之后。
+   * 该 stream 对应的 user message 在 session 内的 promptSeq（与 session
+   * 内 user/message 数严格对应）。渲染时按 N 把草稿紧跟到 byConv 中
+   * 对应用户消息之后——不依赖任何 id 命名空间匹配。
    */
-  anchorMsgId?: string
+  promptSeq?: number
+  /**
+   * true = 发送时预留的 loading 占位（还没有真实 delta 到达）。
+   * 真实 stream 一旦以相同 promptSeq 出现，占位就被接管并删除。
+   */
+  placeholder?: boolean
   content: string
   /** 草稿创建时间（用于按 createdAt 排序，插入到 byConv 中正确的位置） */
   createdAt: number
@@ -208,13 +213,12 @@ export const useMessagesStore = defineStore('messages', () => {
     images?: Array<{ mediaType: string; data: string; name?: string; size?: number }>,
     attachments?: MessageAttachment[],
   ) {
-    // 本地 id：占位 + 锚点（stream draft 据此把回复插在用户消息之后）
-    const localId = crypto.randomUUID()
-    pendingAnchors.push({ localMsgId: localId, conversationId })
-    // 先把 placeholder 推进 byConv —— 立即让输入框后的 UI 看到这条消息，
-    // 同时为后面的回复提供锚定位置。等后端确认后用真实 id 替换。
+    const existingUserMsgs = (byConv.value[conversationId] ?? [])
+      .filter(m => m.is_self === 1).length
+    const placeholderId = `m-u${String(existingUserMsgs + 1)}`
+    // 先把 placeholder 推进 byConv —— 立即让输入框后的 UI 看到这条消息。
     append({
-      id: localId,
+      id: placeholderId,
       conversation_id: conversationId,
       sender_type: 'user',
       sender_id: 'me',
@@ -225,24 +229,43 @@ export const useMessagesStore = defineStore('messages', () => {
       created_at: Date.now(),
       ...(attachments !== undefined && attachments.length > 0 ? { attachments } : {}),
     })
-    const real = await chatApi.sendMessage(conversationId, content, images, attachments)
-    // 真实 msg 到达：用真实 id 替换本地占位（content 已带附件，省去重发）
-    if (real.id !== localId) {
-      const list = byConv.value[conversationId] ?? []
-      const idx = list.findIndex(m => m.id === localId)
-      if (idx !== -1) {
-        const next = list.slice()
-        next[idx] = { ...next[idx], id: real.id }
-        byConv.value = { ...byConv.value, [conversationId]: next }
+
+    // 立刻为这条消息预留一个 loading 气泡：用户连发多条时，每条都要有
+    // 自己的占位，而不是等第一个 delta 才冒泡（那会只剩一个 loading）。
+    // promptSeq 先用页面内计数估算，等服务端回执回来再校正为真实值——
+    // 长会话分页时页面计数与 session 内的 promptSeqOf 会错位，必须以服
+    // 务端为准，否则占位不能被真实 stream 接管而残留成永久 loading。
+    const estimatedSeq = existingUserMsgs + 1
+    const placeholderDraftId = `m-ph-${placeholderId}`
+    const replyBotId = conversationId.startsWith('private:')
+      ? conversationId.slice('private:'.length)
+      : ''
+    if (replyBotId !== '') {
+      streams.value = {
+        ...streams.value,
+        [placeholderDraftId]: {
+          draftId: placeholderDraftId,
+          conversationId,
+          botId: replyBotId,
+          promptSeq: estimatedSeq,
+          placeholder: true,
+          content: '',
+          createdAt: Date.now(),
+          segments: [],
+        },
       }
-      // 锚点也跟着重命名（draftId/anchorMsgId 之间的对应不变）
-      for (let i = 0; i < pendingAnchors.length; i++) {
-        const a = pendingAnchors[i]
-        if (a === undefined) continue
-        if (a.localMsgId === localId) {
-          pendingAnchors.splice(i, 1, { ...a, localMsgId: real.id })
-          break
-        }
+    }
+
+    const ack = await chatApi.sendMessage(conversationId, content, images, attachments)
+    // 用服务端返回的真实 promptSeq 校正占位（群聊没有该字段则保持估算值）
+    const placeholder = streams.value[placeholderDraftId]
+    if (ack.promptSeq !== undefined && placeholder !== undefined) {
+      streams.value = {
+        ...streams.value,
+        [placeholderDraftId]: {
+          ...placeholder,
+          promptSeq: ack.promptSeq,
+        },
       }
     }
   }
@@ -250,65 +273,90 @@ export const useMessagesStore = defineStore('messages', () => {
   /** 终止正在生成的 AI 回复（botId 省略则终止该会话所有 bot） */
   async function stopGeneration(conversationId: string, botId?: string) {
     await chatApi.stopMessage(conversationId, botId)
+    // 用户主动终止：占位气泡必须跟着消失。否则它们会一直转圈——
+    // 被终止的回复不会再有 delta 来接管它们。
+    dropPlaceholders(conversationId)
+  }
+
+  /**
+ * Index of the Nth user message in `list`, or -1 when it does not exist.
+ *
+ * Used to place a finished AI reply (`m-p{N}`) directly after the prompt it
+ * answers instead of at the end of the list.
+ */
+  function indexOfNthUserMessage(list: readonly Message[], nth: number): number {
+    let seen = 0
+    for (let i = 0; i < list.length; i++) {
+      if (list[i]?.is_self !== 1) continue
+      seen += 1
+      if (seen === nth) return i
+    }
+    return -1
   }
 
   function append(msg: Message) {
     if (msg.sender_type === 'ai_bot') msg.content = msg.content.trim()
     const list = byConv.value[msg.conversation_id] ?? []
     if (list.some(m => m.id === msg.id)) return
+    // 最终 AI 回复的 id 形如 `m-p{N}`（后端 aggregatePrompt），N 即 promptSeq。
+    // 直接 push 到末尾会让"回复跑到两条用户消息之后"，破坏交替顺序——
+    // 这里按 N 插到对应用户消息之后，与流式期间的草稿位置保持一致。
+    const reply = /^m-p(\d+)$/.exec(msg.id)
+    if (reply !== null) {
+      const anchor = indexOfNthUserMessage(list, Number(reply[1]))
+      if (anchor !== -1) {
+        const next = list.slice()
+        next.splice(anchor + 1, 0, msg)
+        byConv.value = { ...byConv.value, [msg.conversation_id]: next }
+        return
+      }
+    }
     byConv.value = { ...byConv.value, [msg.conversation_id]: [...list, msg] }
   }
 
   /**
- * FIFO 队列：每个挂起项是 `{ localMsgId, conversationId }`。
- *
- * send() 推一个进来；`message.stream` 帧首次为该 conversationId 创建 draft 时，
- * 按 FIFO 取一个挂起，把对应的本地 id 写进 draft.anchorMsgId。
- *
- * 私聊场景（一个 bot）下这是精确配对；群聊场景下多个 bot 的回复也会按入队
- * 顺序认领各自锚点，因为同一时刻不会出现多个 draft 同时被首次创建（驱动串行）。
- */
-  const pendingAnchors: Array<{ localMsgId: string; conversationId: string }> = []
-
-  /**
- * Claim the next pending anchor for `conversationId`, if any. Called when a
- * new stream draft is created.
- */
-  function takeAnchor(conversationId: string): string | undefined {
-    for (let i = 0; i < pendingAnchors.length; i++) {
-      const a = pendingAnchors[i]
-      if (a === undefined) continue
-      if (a.conversationId === conversationId) {
-        pendingAnchors.splice(i, 1)
-        return a.localMsgId
-      }
-    }
-    return undefined
-  }
-
-  /** 工具事件早于首个文本 delta 到达时创建空草稿（content 为空、segments 为空），
+ * 工具事件早于首个文本 delta 到达时创建空草稿（content 为空、segments 为空），
    *  让工具卡片在模型生成工具参数期间即可见（如 write 大文件流式预览） */
-  function ensureStreamDraft(draftId: string, conversationId?: string, botId?: string) {
+  function ensureStreamDraft(
+    draftId: string,
+    conversationId?: string,
+    botId?: string,
+    promptSeq?: number,
+  ) {
     if (streams.value[draftId]) return
     if (!conversationId || !botId) return
-    const anchorMsgId = takeAnchor(conversationId)
-    streams.value = {
-      ...streams.value,
-      [draftId]: {
-        draftId,
-        conversationId,
-        botId,
-        // 用户消息 id（send 时本地分配）：草稿据此插入到 byConv 中
-        // 该用户消息之后。多个用户消息连续发送时，每个草稿消费一个挂起，
-        // 保证回复分别落在各自的用户消息下方。
-        anchorMsgId,
-        content: '',
-        // 用模型驱动事件的当前时间作为草稿创建时间（同一 stream 第一次
-        // 创建后再不会变），渲染时按此把草稿插入 byConv 中正确的位置
-        createdAt: Date.now(),
-        segments: [],
-      },
+    // 真实 stream 来了：接管掉同 promptSeq 的 loading 占位。
+    // 占位和真实草稿是两条独立记录（id 不同），不删就会同时渲染——
+    // 一个永久转圈 + 一个正常输出。
+    const stale = new Set(
+      Object.entries(streams.value)
+        .filter(([, d]) => promptSeq !== undefined && d?.placeholder === true
+          && d.conversationId === conversationId && d.promptSeq === promptSeq)
+        .map(([id]) => id))
+    const next: Record<string, StreamDraft> = Object.fromEntries(
+      Object.entries(streams.value).filter(([id]) => !stale.has(id)))
+    next[draftId] = {
+      draftId,
+      conversationId,
+      botId,
+      // 后端 stream 帧携带的 promptSeq：与 session 内 user message 数同源，
+      // 渲染时按此把草稿插入到 byConv 中对应用户消息之后。
+      promptSeq: promptSeq ?? NaN,
+      content: '',
+      // 用模型驱动事件的当前时间作为草稿创建时间（同一 stream 第一次
+      // 创建后再不会变），渲染时按此把草稿插入 byConv 中正确的位置
+      createdAt: Date.now(),
+      segments: [],
     }
+    streams.value = next
+  }
+
+  /** 丢弃某会话全部 loading 占位（回复已落库 / 会话重置时兜底，避免永久转圈） */
+  function dropPlaceholders(conversationId: string): void {
+    const kept = Object.entries(streams.value)
+      .filter(([, d]) => !(d?.placeholder === true && d.conversationId === conversationId))
+    if (kept.length === Object.keys(streams.value).length) return
+    streams.value = Object.fromEntries(kept)
   }
 
   /** 将 tool 段插入流式草稿的时间线（若已存在则跳过），保证工具调用与文本按时间顺序排列 */
@@ -422,7 +470,7 @@ export const useMessagesStore = defineStore('messages', () => {
               : (prev?.content ?? '') + f.delta
             // 首次创建草稿：让 ensureStreamDraft 负责挂起挂载（pendingAnchors
             // FIFO 消费），确保草稿锚定到正确的用户消息。
-            ensureStreamDraft(f.messageId, f.conversationId, f.botId)
+            ensureStreamDraft(f.messageId, f.conversationId, f.botId, f.promptSeq)
             streams.value = {
               ...streams.value,
               [f.messageId]: {
@@ -529,12 +577,21 @@ export const useMessagesStore = defineStore('messages', () => {
         case 'message.created': {
           const msg = frame.data as Message
           append(msg)
-          // 清理同 conversationId + botId 的流式草稿（draftId 与 msg.id 不同）
-          // 同时清理 typing 状态，避免空 loading 气泡残留
-          const staleDrafts = Object.entries(streams.value)
-            .filter(([, d]) => d.conversationId === msg.conversation_id && d.botId === msg.sender_id)
-          if (staleDrafts.length > 0) {
-            const staleIds = new Set(staleDrafts.map(([did]) => did))
+          // 清理该回复对应的草稿与 loading 占位。
+          // 注意：只清理"本条"（同 promptSeq / 同 draftId），不能像以前那样
+          // 清掉同会话所有草稿 —— 连发多条时，第一条完成会把后面几条消息
+          // 的 loading 占位一起抹掉，导致中间出现"没有 loading"的空窗。
+          const doneSeq = /^m-p(\d+)$/.exec(msg.id)
+          const staleIds = new Set<string>()
+          for (const [did, d] of Object.entries(streams.value)) {
+            if (d === undefined) continue
+            if (d.conversationId !== msg.conversation_id) continue
+            // 同一条回复的草稿（draftId 与最终 id 一致，或 promptSeq 相同）
+            const sameReply = did === msg.id
+              || (doneSeq !== null && d.promptSeq === Number(doneSeq[1]))
+            if (sameReply) staleIds.add(did)
+          }
+          if (staleIds.size > 0) {
             streams.value = Object.fromEntries(
               Object.entries(streams.value).filter(([did]) => !staleIds.has(did)))
           }

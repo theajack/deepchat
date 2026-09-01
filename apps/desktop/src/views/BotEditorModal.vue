@@ -207,10 +207,22 @@ async function generatePersona() {
 }
 
 /**
- * 打开系统目录选择对话框挑一个工作目录。
- * 用户取消时保持原值不变（不要清空，避免误点丢掉已填内容）。
+ * 工作目录只能在新建时指定：好友落库后，agent 会话的 cwd、文件工具沙箱与
+ * 长期记忆都已绑定到该目录，中途改指向会让既有记忆与文件凭空"消失"。
  */
+/** 用系统默认程序打开该好友的工作目录 */
+async function openWorkspaceDir() {
+  const dir = form.workspace_dir.trim()
+  if (dir === "") return
+  try {
+    await agentApi.toolOpenDir(dir)
+  } catch {
+    app.toast(t("dataDir.openFailed"))
+  }
+}
+
 async function pickWorkspaceDir() {
+  if (!isNew.value) return
   try {
     // 从当前值出发，未填时从默认目录出发
     const start =
@@ -250,7 +262,9 @@ async function save() {
       auto_speak: form.auto_speak,
       idle_trigger_minutes: Number(form.idle_trigger_minutes),
     },
-    workspace_dir: form.workspace_dir.trim() || null,
+    // 工作目录只在新建时下发。编辑时后端已有值，传 null 会被当成"清空"，
+    // 所以整字段不传（后端 update 只改显式给出的字段）。
+    ...(isNew.value ? { workspace_dir: form.workspace_dir.trim() || null } : {}),
     agent_enabled: Number(form.agent_enabled),
     max_turns: Number(form.max_turns),
     approval_policy: form.approval_policy,
@@ -434,19 +448,24 @@ async function save() {
         </div>
       </div>
 
-      <!-- 工作目录：点击选择系统目录，留空则沿用后端默认目录 -->
+      <!-- 工作目录：仅新建时可指定（点击选择系统目录）；编辑时只读展示 -->
       <div>
-        <label class="mb-1.5 block text-xs text-mid">{{ t("bot.workspaceDir") }}</label>
+        <label class="mb-1.5 flex items-center gap-1.5 text-xs text-mid">
+          {{ t("bot.workspaceDir") }}
+          <span v-if="!isNew" class="rounded border border-line px-1 py-px text-[10px] text-lo">{{ t("common.readOnly") }}</span>
+        </label>
         <div class="flex items-center gap-2">
           <input
             :value="form.workspace_dir"
             type="text"
             readonly
             :placeholder="t('bot.workspaceDirPlaceholder')"
-            class="min-w-0 flex-1 cursor-default truncate rounded-lg border border-line bg-ink-2/70 px-3 py-2 font-mono text-[12px] text-hi outline-none transition-all placeholder:text-lo focus:border-accent/45"
+            :class="isNew ? 'cursor-pointer hover:border-accent/45' : 'cursor-not-allowed opacity-60'"
+            class="min-w-0 flex-1 truncate rounded-lg border border-line bg-ink-2/70 px-3 py-2 font-mono text-[12px] text-hi outline-none transition-all placeholder:text-lo focus:border-accent/45"
             @click="pickWorkspaceDir"
           />
           <button
+            v-if="isNew"
             type="button"
             class="flex shrink-0 cursor-pointer items-center gap-1.5 rounded-lg border border-line bg-ink-2 px-3 py-2 text-[12px] text-mid transition-colors hover:border-accent/45 hover:text-accent"
             @click="pickWorkspaceDir"
@@ -455,7 +474,7 @@ async function save() {
             {{ t("bot.workspaceDirBrowse") }}
           </button>
           <button
-            v-if="form.workspace_dir"
+            v-if="isNew && form.workspace_dir"
             type="button"
             class="shrink-0 cursor-pointer rounded-lg border border-line px-2.5 py-2 text-[12px] text-lo transition-colors hover:text-hi"
             :title="t('bot.workspaceDirClear')"
@@ -463,8 +482,22 @@ async function save() {
           >
             ×
           </button>
+          <!-- 已存在的好友：目录已落盘，提供"打开"便于直接查看/管理 -->
+          <button
+            v-if="!isNew"
+            type="button"
+            class="flex shrink-0 cursor-pointer items-center gap-1.5 rounded-lg border border-line bg-ink-2 px-3 py-2 text-[12px] text-mid transition-colors hover:border-accent/45 hover:text-accent disabled:cursor-not-allowed disabled:opacity-40"
+            :disabled="!form.workspace_dir.trim()"
+            :title="t('bot.workspaceDirOpen')"
+            @click="openWorkspaceDir"
+          >
+            <FolderOpen :size="13" />
+            {{ t("bot.workspaceDirOpen") }}
+          </button>
         </div>
-        <p class="mt-1.5 text-[11px] leading-relaxed text-lo">{{ t("bot.workspaceDirHint") }}</p>
+        <p class="mt-1.5 text-[11px] leading-relaxed text-lo">
+          {{ isNew ? t("bot.workspaceDirHint") : t("bot.workspaceDirLockedHint") }}
+        </p>
       </div>
       <div class="flex justify-end gap-2 pt-1">
         <button class="rounded-lg border border-line-strong/50 px-4 py-2 text-[13px] text-mid transition-all hover:bg-ink-3 hover:text-hi"
