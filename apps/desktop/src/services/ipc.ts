@@ -1,5 +1,6 @@
 import { t } from '../i18n'
 import type { TriggerConfig } from '../types'
+import { convertFileSrc } from '@tauri-apps/api/core'
 import { dshBaseUrl, dshChatEvents, dshEvents, dshGet, dshSend } from './transport/dsh'
 
 /** CLI 事件帧 */
@@ -238,9 +239,12 @@ function toFrontMessage(row: DshMessageRow, conversationId: string): FrontMessag
 /**
  * 把后端附件元信息映射成前端形状，并把图片引用补全成可访问的 URL。
  *
- * 历史图片的 `ref` 有两种形态：
- * - 新发送的：`/chatapi/images/<convId>/<file>`，相对路径，前端拼 base URL
- * - 旧的：`att-<id>`，attachment store id，需走 `/chatapi/attachments/:id`
+ * 历史图片的 `ref` 有三种形态：
+ * - 新发送的：磁盘绝对路径（`/Users/...`），用 Tauri 的 convertFileSrc 转成
+ *   `asset://localhost/...`，让 webview 走本地文件协议，避开自身跨源
+ *   CORS（`http://127.0.0.1:3180` 的 <img> 在 WKWebView 里被拒）
+ * - 旧的相对路径：`/chatapi/images/...`，由 dsh HTTP 服务
+ * - 最老的：`att-<id>`，attachment store id，需走 `/chatapi/attachments/:id`
  *
  * 文件的 `ref` 是工作区相对路径，前端拿不到绝对路径，交给后端解析。
  */
@@ -257,10 +261,19 @@ function toFrontAttachment(raw: {
   let url = ''
   if (kind === 'image') {
     if (ref.startsWith('/')) {
-      // 新路径：磁盘上的图片直接由 dsh 端 HTTP 服务
-      url = `${dshBaseUrl()}${ref}`
+      // 两种可能：磁盘绝对路径 或 后端 HTTP 相对路径。
+      // 后者的 ref 由 send 端点生成，形如 /chatapi/images/<convId>/<file>
+      // （带空格以外的路径），与真实磁盘路径（如 /Users/...）有可区分的差异：
+      // 磁盘路径一定在 HOME 下，不会含 /chatapi/。
+      if (ref.includes('/chatapi/')) {
+        url = `${dshBaseUrl()}${ref}`
+      } else {
+        // 磁盘绝对路径：交给 Tauri 转换。assetProtocol scope = ["**"]，
+        // 所以 $HOME 下任何文件都能被 webview 加载。
+        url = convertToAssetUrl(ref)
+      }
     } else if (ref !== '') {
-      // 老路径：attachment store id
+      // 最老的 attachment store id
       url = `${dshBaseUrl()}/chatapi/attachments/${encodeURIComponent(ref)}`
     }
   }
@@ -271,6 +284,23 @@ function toFrontAttachment(raw: {
     size: Number(raw.size ?? 0),
     ref,
     url,
+  }
+}
+
+/**
+ * 把磁盘绝对路径转换成 Tauri webview 可加载的 asset:// URL。
+ *
+ * `tauri.conf.json` 已启用 assetProtocol 且 scope 为 ["**"]，因此 $HOME
+ * 下任何文件都能被 webview 直接加载，避开跨源 CORS。
+ *
+ * 纯浏览器开发（不在 Tauri 内）时 convertFileSrc 会抛错（window.__TAURI__
+ * 不存在），此时回退为 file:// 走浏览器原生能力。
+ */
+function convertToAssetUrl(absPath: string): string {
+  try {
+    return convertFileSrc(absPath)
+  } catch {
+    return `file://${absPath}`
   }
 }
 

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useConversationsStore } from "../../stores/conversations";
-import { useMessagesStore } from "../../stores/messages";
+import { useMessagesStore, type StreamSegment } from "../../stores/messages";
 import { useBotsStore } from "../../stores/bots";
 import { useSelfStore } from "../../stores/self";
 import { formatSeparator } from "../../utils/display";
@@ -111,66 +111,121 @@ const rows = computed<Row[]>(() => {
   if (!conv.value) return [];
   const convId = conv.value.id;
   const list = messages.byConv[convId] ?? [];
-  const result: Row[] = [];
-
-  list.forEach((msg, i) => {
-    const prev = list[i - 1];
-    if (!prev || msg.created_at - prev.created_at > TIME_GAP) {
-      result.push({ type: "time", key: `t-${msg.id}`, text: formatSeparator(msg.created_at) });
-    }
-    // 用户消息（isSelf）始终显示头像，避免连续发言时气泡对不齐；
-    // AI 消息仅在间隔 > TIME_GAP 时显示头像以节省空间
-    const isUserMsg = msg.is_self === 1;
-    const samePrev = !isUserMsg && prev && prev.sender_id === msg.sender_id && msg.created_at - prev.created_at <= TIME_GAP;
-    result.push({
-      type: "msg",
-      key: msg.id,
-      model: {
-        key: msg.id,
-        isSelf: isUserMsg,
-        senderName: msg.sender_name,
-        avatar: isUserMsg ? null : avatarOf(msg.sender_id),
-        selfAvatar: isUserMsg ? selfStore.avatar : null,
-        content: msg.content,
-        segments: msg.segments,
-        time: msg.created_at,
-        showAvatar: isUserMsg || !samePrev,
-        showSender: !samePrev,
-        animate: i === list.length - 1,
-        promptTokens: msg.prompt_tokens ?? 0,
-        completionTokens: msg.completion_tokens ?? 0,
-        durationMs: msg.duration_ms ?? 0,
-        cachedTokens: msg.cached_tokens ?? 0,
-        aborted: msg.stop_reason === "aborted",
-        conversationId: msg.conversation_id,
-        botId: msg.is_self === 1 ? undefined : msg.sender_id,
-        attachments: msg.attachments,
-      },
-    });
-  });
-
-  // 流式草稿
+  // 把持久化消息与流式草稿合并，按 createdAt 统一排序后再渲染。
+  // 用户连续发多条消息、模型在两条之间才回复时，草稿需要插在两条消息中间
+  // 而不是堆到底部。
+  type StreamRow = {
+    kind: "stream"
+    draftId: string
+    conversationId: string
+    botId: string
+    content: string
+    segments: StreamSegment[]
+    createdAt: number
+  }
+  type PersistedRow = {
+    kind: "msg"
+    msg: typeof list[number]
+  }
+  type Source = StreamRow | PersistedRow
+  const sources: Source[] = []
+  for (const m of list) {
+    sources.push({ kind: "msg", msg: m })
+  }
   for (const draft of Object.values(messages.streams)) {
-    if (draft.conversationId !== convId) continue;
-    const bot = bots.items.find((b) => b.id === draft.botId);
-    result.push({
-      type: "msg",
-      key: draft.draftId,
-      model: {
+    if (draft.conversationId !== convId) continue
+    sources.push({
+      kind: "stream",
+      draftId: draft.draftId,
+      conversationId: draft.conversationId,
+      botId: draft.botId,
+      content: draft.content,
+      segments: draft.segments,
+      createdAt: draft.createdAt,
+    })
+  }
+  sources.sort((a, b) => {
+    const at = a.kind === "msg" ? a.msg.created_at : a.createdAt
+    const bt = b.kind === "msg" ? b.msg.created_at : b.createdAt
+    return at - bt
+  })
+
+  const result: Row[] = []
+  let lastRenderedTime: number | null = null
+  let lastRenderedSender: string | null = null
+  let lastRenderedIsUser: boolean | null = null
+
+  for (const src of sources) {
+    const time = src.kind === "msg" ? src.msg.created_at : src.createdAt
+    const isUserMsg = src.kind === "msg" ? src.msg.is_self === 1 : false
+    const senderId = src.kind === "msg" ? src.msg.sender_id : src.botId
+    const samePrev =
+      lastRenderedTime !== null
+      && time - lastRenderedTime <= TIME_GAP
+      && lastRenderedSender === senderId
+      && lastRenderedIsUser === isUserMsg
+    // 时间分隔：跨超过 5 分钟的相邻消息显示一段对话时间。
+    if (lastRenderedTime === null || time - lastRenderedTime > TIME_GAP) {
+      result.push({ type: "time", key: `t-${src.kind === "msg" ? src.msg.id : src.draftId}`, text: formatSeparator(time) });
+    }
+    // AI 输出（不管是不是 stream 也不管相邻是不是同一 bot）始终显示头像：
+    // 头像的省略本意是节省纵向，但实际造成气泡对不齐/没头像让人分不清谁在说话。
+    // 用户消息按现有规则处理。
+    const showAvatar = isUserMsg ? true : true
+    const showSender = isUserMsg ? false : !samePrev
+
+    if (src.kind === "msg") {
+      const msg = src.msg
+      result.push({
+        type: "msg",
+        key: msg.id,
+        model: {
+          key: msg.id,
+          isSelf: isUserMsg,
+          senderName: msg.sender_name,
+          avatar: isUserMsg ? null : avatarOf(msg.sender_id),
+          selfAvatar: isUserMsg ? selfStore.avatar : null,
+          content: msg.content,
+          segments: msg.segments,
+          time: msg.created_at,
+          showAvatar,
+          showSender: isUserMsg ? true : showSender,
+          animate: false,
+          promptTokens: msg.prompt_tokens ?? 0,
+          completionTokens: msg.completion_tokens ?? 0,
+          durationMs: msg.duration_ms ?? 0,
+          cachedTokens: msg.cached_tokens ?? 0,
+          aborted: msg.stop_reason === "aborted",
+          conversationId: msg.conversation_id,
+          botId: msg.is_self === 1 ? undefined : msg.sender_id,
+          attachments: msg.attachments,
+        },
+      })
+    } else {
+      const draft = src
+      const bot = bots.items.find((b) => b.id === draft.botId)
+      result.push({
+        type: "msg",
         key: draft.draftId,
-        isSelf: false,
-        senderName: bot?.name ?? "",
-        avatar: bot?.avatar ?? null,
-        content: draft.content,
-        segments: draft.segments,
-        time: null,
-        showAvatar: true,
-        showSender: false,
-        streaming: true,
-        conversationId: draft.conversationId,
-        botId: draft.botId,
-      },
-    });
+        model: {
+          key: draft.draftId,
+          isSelf: false,
+          senderName: bot?.name ?? "",
+          avatar: bot?.avatar ?? null,
+          content: draft.content,
+          segments: draft.segments,
+          time: null,
+          showAvatar: true,
+          showSender: !samePrev,
+          streaming: true,
+          conversationId: draft.conversationId,
+          botId: draft.botId,
+        },
+      })
+    }
+    lastRenderedTime = time
+    lastRenderedSender = senderId
+    lastRenderedIsUser = isUserMsg
   }
 
   // typing 指示（无流式草稿时）

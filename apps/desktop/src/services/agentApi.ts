@@ -91,6 +91,19 @@ export interface LlmTraceMessage {
   content: string
 }
 
+/** Facts about one image that reached the model, after normalization. */
+export interface TraceImageInfo {
+  attachmentId: string
+  name?: string
+  mediaType: string
+  bytes: number
+  width: number
+  height: number
+  /** Present only when admission scaled the image down. */
+  originalWidth?: number
+  originalHeight?: number
+}
+
 export interface LlmTraceEntry {
   id: string
   ts: number
@@ -102,11 +115,46 @@ export interface LlmTraceEntry {
   botName?: string
   system: string
   input: LlmTraceMessage[]
+  /** Images carried by this call, in message order. */
+  attachments: TraceImageInfo[]
   output: string
   reasoning: string
   toolCalls: { name: string; args?: unknown }[]
   usage: { promptTokens?: number; completionTokens?: number }
   error?: string
+}
+
+/**
+ * One user-initiated upload. Images are admitted into the attachment store;
+ * documents are written to the bot workspace and only their path reaches the
+ * model. Neither is a model call, so they are logged separately.
+ */
+export interface UploadTraceEntry {
+  id: string
+  ts: number
+  kind: 'image' | 'file'
+  botId?: string
+  botName?: string
+  name: string
+  /** Bytes as uploaded, before normalization. */
+  sourceBytes: number
+  /** Bytes that landed in storage. */
+  bytes: number
+  mediaType?: string
+  width?: number
+  height?: number
+  originalWidth?: number
+  originalHeight?: number
+  attachmentId?: string
+  /** Files only: workspace-relative path. */
+  path?: string
+  error?: string
+}
+
+/** The trace endpoint's payload: model calls plus the upload log. */
+export interface LlmTraceSnapshot {
+  entries: LlmTraceEntry[]
+  uploads: UploadTraceEntry[]
 }
 
 export const toolList = (botId: string) => transport.request<ToolInfo[]>('tool.list', { botId })
@@ -140,7 +188,7 @@ export const mcpTest = (id: string) => transport.request('mcp.test', { id })
 export const mcpTools = (id: string) => transport.request<McpToolInfo[]>('mcp.tools', { id })
 export const approvalRespond = (requestId: string, decision: ApprovalDecision) =>
   transport.request('approval.respond', { requestId, decision })
-export const llmTraceList = () => transport.request<LlmTraceEntry[]>('llm.trace.list', {})
+export const llmTraceList = () => transport.request<LlmTraceSnapshot>('llm.trace.list', {})
 export const llmTraceClear = () => transport.request<{ ok: boolean }>('llm.trace.clear', {})
 
 /** 统一 API 对象，组件通过 import { agentApi } 访问。 */

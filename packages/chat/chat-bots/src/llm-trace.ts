@@ -15,9 +15,28 @@ import type { Context } from '@deepseek-ai/cordis'
 import { randomUUID } from 'node:crypto'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import type { GenerateOptions, StreamChunk, TokenUsage } from '@deepseek-ai/dsh-llm'
-import type { ContentBlock } from '@deepseek-ai/dsh-llm'
+import type { ContentBlock, ImageBlock } from '@deepseek-ai/dsh-llm'
 
 const TRACE_LIMIT = 50
+
+/**
+ * Post-normalization facts about one image that reached the model.
+ *
+ * `bytes`/`width`/`height` describe what the model actually received; the
+ * optional `original*` pair is the pre-normalization input, present only when
+ * admission scaled the image. The gap between the two is what the debug panel
+ * surfaces so a user can see how much their upload was shrunk.
+ */
+export interface TraceImageInfo {
+  readonly attachmentId: string
+  readonly name?: string
+  readonly mediaType: string
+  readonly bytes: number
+  readonly width: number
+  readonly height: number
+  readonly originalWidth?: number
+  readonly originalHeight?: number
+}
 
 /** One recorded model call (shape-compatible with the legacy UI LlmTraceEntry). */
 export interface LlmTraceEntry {
@@ -32,6 +51,8 @@ export interface LlmTraceEntry {
   readonly purpose?: string
   system: string
   input: { role: string; content: string }[]
+  /** Images carried by this call, in message order. */
+  attachments: TraceImageInfo[]
   output: string
   reasoning: string
   toolCalls: { name: string; args?: unknown }[]
@@ -39,11 +60,67 @@ export interface LlmTraceEntry {
   error?: string
 }
 
-/** Flatten content blocks to display text (images become placeholders). */
-function renderBlocks(blocks: readonly ContentBlock[]): string {
+/**
+ * One user-initiated upload, recorded outside the model-call waterfall.
+ *
+ * Images and documents take different routes — images are admitted into the
+ * attachment store and ride along inside the request; documents are written to
+ * the bot's workspace and only their path reaches the model. Neither is a model
+ * call, so they get their own ring buffer rather than polluting LlmTraceEntry.
+ */
+export interface UploadTraceEntry {
+  readonly id: string
+  readonly ts: number
+  readonly kind: 'image' | 'file'
+  readonly botId?: string
+  readonly botName?: string
+  readonly name: string
+  /** Bytes as originally uploaded, before any normalization. */
+  readonly sourceBytes: number
+  /** Bytes that actually landed in storage; differs from `sourceBytes` when an image was re-encoded. */
+  readonly bytes: number
+  /** Images only. */
+  readonly mediaType?: string
+  /** Images only: dimensions after normalization. */
+  readonly width?: number
+  readonly height?: number
+  /** Images only: dimensions before normalization, when admission scaled it. */
+  readonly originalWidth?: number
+  readonly originalHeight?: number
+  /** Images only: attachment-store id. */
+  readonly attachmentId?: string
+  /** Files only: workspace-relative path handed to the model. */
+  readonly path?: string
+  readonly error?: string
+}
+
+/** Project an image block's attachment ref onto its trace shape. */
+function imageInfo(attachment: ImageBlock['attachment']): TraceImageInfo {
+  return {
+    attachmentId: String(attachment.attachmentId),
+    ...(attachment.name !== undefined ? { name: attachment.name } : {}),
+    mediaType: attachment.mediaType,
+    bytes: attachment.bytes,
+    width: attachment.width,
+    height: attachment.height,
+    ...(attachment.originalDimensions !== undefined ? {
+      originalWidth: attachment.originalDimensions.width,
+      originalHeight: attachment.originalDimensions.height,
+    } : {}),
+  }
+}
+
+/**
+ * Flatten content blocks to display text (images become placeholders), while
+ * collecting image facts into `sink` when one is supplied.
+ */
+function renderBlocks(blocks: readonly ContentBlock[], sink?: TraceImageInfo[]): string {
   return blocks.map((block) => {
     if (block.type === 'text' || block.type === 'reasoning') return block.text
-    if (block.type === 'image') return '[图片]'
+    if (block.type === 'image') {
+      sink?.push(imageInfo(block.attachment))
+      return '[图片]'
+    }
     if (block.type === 'tool-call') return `[工具调用 ${block.name}]`
     return `[${block.type}]`
   }).join('\n')
@@ -62,6 +139,7 @@ export type TraceBotResolver = (sessionId: SessionId | undefined) => { botId: st
 
 export class LlmTraceRecorder {
   private entries: LlmTraceEntry[] = []
+  private uploads: UploadTraceEntry[] = []
 
   constructor(ctx: Context, resolveBot: TraceBotResolver) {
     ctx.on('llm/stream', (options: GenerateOptions, next: () => AsyncIterable<StreamChunk>) =>
@@ -73,8 +151,24 @@ export class LlmTraceRecorder {
     return this.entries
   }
 
+  /** Newest-first upload log for the debug window. */
+  listUploads(): UploadTraceEntry[] {
+    return this.uploads
+  }
+
+  /**
+   * Record a user-initiated upload. Callers outside the model waterfall
+   * (`/send` image admission, the `upload-file` action) use this to make an
+   * otherwise invisible step inspectable.
+   */
+  recordUpload(entry: Omit<UploadTraceEntry, 'id' | 'ts'>): void {
+    this.uploads.unshift({ id: randomUUID(), ts: Date.now(), ...entry })
+    if (this.uploads.length > TRACE_LIMIT) this.uploads.length = TRACE_LIMIT
+  }
+
   clear(): void {
     this.entries = []
+    this.uploads = []
   }
 
   private async *traceOne(
@@ -84,6 +178,9 @@ export class LlmTraceRecorder {
   ): AsyncIterable<StreamChunk> {
     const sessionId = options.sessionId
     const bot = resolveBot(sessionId)
+    // Images are flattened to placeholders in the rendered text, so collect
+    // their facts separately to keep them inspectable in the debug panel.
+    const attachments: TraceImageInfo[] = []
     const entry: LlmTraceEntry = {
       id: randomUUID(),
       ts: Date.now(),
@@ -94,7 +191,11 @@ export class LlmTraceRecorder {
       ...(bot !== undefined ? { botId: bot.botId, botName: bot.botName } : {}),
       ...(options.purpose !== undefined ? { purpose: options.purpose } : {}),
       system: options.system ?? '',
-      input: options.messages.map(message => ({ role: message.role, content: renderBlocks(message.content) })),
+      input: options.messages.map(message => ({
+        role: message.role,
+        content: renderBlocks(message.content, attachments),
+      })),
+      attachments,
       output: '',
       reasoning: '',
       toolCalls: [],

@@ -467,7 +467,7 @@ const usageText = computed(() => {
 
 <template>
   <div
-    class="group flex items-start gap-0 px-5 py-0.5"
+    class="group flex items-start gap-0 px-5 py-0.5 mb-2"
     :class="[item.isSelf ? 'flex-row-reverse' : 'flex-row mb-3', { 'msg-in': item.animate }]"
     :data-msg-id="item.key"
   >

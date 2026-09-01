@@ -252,6 +252,23 @@ Source: [`packages/core/session/src/types.ts:277`](../packages/core/session/src/
 
 Source: [`packages/chat/chat-bots/src/attachments.ts:59`](../packages/chat/chat-bots/src/attachments.ts)
 
+<a id="chatdocument-hint--log-only"></a>
+
+#### `chat/document-hint` — log-only
+
+```ts persistence-catalog
+/**
+ * Document-attachment hint shown to the model. Lives outside the user
+ * message envelope so it never appears in the chat bubble, and is keyed by
+ * the seq of the *user/message* event that should *consume* it (set by
+ * the sender, not derived from ordering). The model reads the hint and
+ * then immediately invokes `read_document`.
+ */
+'chat/document-hint': { readonly forMessageSeq: number; readonly text: string }
+```
+
+Source: [`packages/chat/chat-bots/src/attachments.ts:67`](../packages/chat/chat-bots/src/attachments.ts)
+
 ### `command/*`
 
 <a id="commanddone--log-only"></a>

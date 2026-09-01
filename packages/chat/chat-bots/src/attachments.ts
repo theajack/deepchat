@@ -57,6 +57,14 @@ declare module '@deepseek-ai/dsh-session/types' {
   interface SessionEventMap {
     /** Attachments belonging to the next user message in this session. */
     'chat/attachments': { readonly items: readonly ChatAttachmentMeta[] }
+    /**
+     * Document-attachment hint shown to the model. Lives outside the user
+     * message envelope so it never appears in the chat bubble, and is keyed by
+     * the seq of the *user/message* event that should *consume* it (set by
+     * the sender, not derived from ordering). The model reads the hint and
+     * then immediately invokes `read_document`.
+     */
+    'chat/document-hint': { readonly forMessageSeq: number; readonly text: string }
   }
 }
 
@@ -230,6 +238,21 @@ export function appendAttachments(session: Session, items: readonly ChatAttachme
 }
 
 /**
+ * Record a document-hint for the user message about to be sent.
+ *
+ * Goes through `session.append` (not `agent.followup`) so the hint lives as an
+ * independent session event the driver never turns into a `user/message`.
+ * That keeps it out of the chat bubble — see `renderPrivateHistory` which
+ * only renders `source.kind === 'user'` events — while still keeping it in
+ * the same session log so the model can read it via `systemPrompt` /
+ * persisted transcripts.
+ */
+export function appendDocumentHint(session: Session, forMessageSeq: number, text: string): void {
+  if (text === '') return
+  session.append('chat/document-hint', { forMessageSeq, text })
+}
+
+/**
  * Pair `chat/attachments` events with the user messages that follow them.
  *
  * The endpoint appends attachments *before* handing input to the driver, so
@@ -282,8 +305,12 @@ export function imagesRoot(): string {
 }
 
 /**
- * Write one image's bytes to disk and return the relative URL path the
- * webview will hit (served by `/chatapi/images/<conversationId>/<file>`).
+ * Write one image's bytes to disk and return the absolute file path.
+ *
+ * The path is the value the webview hands to Tauri `convertFileSrc`, which
+ * rewrites it to an `asset://` URL the WKWebView will load without crossing
+ * any HTTP origin. Returning absolute (not relative) paths lets history and
+ * fresh sends both feed the same front-end code.
  *
  * Failures fall back to an empty string so the caller keeps going — better
  * to send the message with a missing picture than to block on disk IO.
@@ -301,8 +328,41 @@ export async function writeChatImage(
   const dir = join(imagesRoot(), conversationId)
   await mkdir(dir, { recursive: true })
   const onDisk = `${String(ts)}-${cleanBase}`
-  await writeFile(join(dir, onDisk), data)
-  return `/chatapi/images/${encodeURIComponent(conversationId)}/${encodeURIComponent(onDisk)}`
+  const abs = join(dir, onDisk)
+  await writeFile(abs, data)
+  return abs
+}
+
+/**
+ * Migrate one attachment-store image to the chat-images tree on disk, so the
+ * webview can load it via `asset://`. Returns the absolute path on success,
+ * undefined on failure (callers should leave the original ref untouched).
+ *
+ * Used by the history endpoint: legacy sessions hold image refs as
+ * attachment-store ids that the webview cannot render cross-origin. Each
+ * history pull walks those refs and dumps the bytes to disk once; subsequent
+ * pulls hit the existing file.
+ */
+export async function migrateImageAttachment(
+  conversationId: string,
+  ref: ImageAttachmentRef,
+  readBytes: () => Promise<Buffer>,
+): Promise<string | undefined> {
+  const ts = Date.now()
+  const base = basename(ref.name ?? 'image').replace(/[^\w.\-]/g, '_').slice(0, 80) || 'image'
+  const dir = join(imagesRoot(), conversationId)
+  await mkdir(dir, { recursive: true })
+  // 把 attachment id 拼进路径：同一 attachment 不会重复迁移（同一 ref 再次
+  // 到达时，因 conversationId + id 组合唯一，仍能落到唯一路径）。
+  const onDisk = `${String(ts)}-${base}`
+  const abs = join(dir, onDisk)
+  try {
+    const bytes = await readBytes()
+    await writeFile(abs, bytes)
+    return abs
+  } catch {
+    return undefined
+  }
 }
 
 /**

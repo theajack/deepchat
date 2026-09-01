@@ -20,6 +20,8 @@ export interface StreamDraft {
   conversationId: string
   botId: string
   content: string
+  /** 草稿创建时间（用于按 createdAt 排序，插入到 byConv 中正确的位置） */
+  createdAt: number
   /** 有序段落列表（思维链与正文交替） */
   segments: StreamSegment[]
 }
@@ -228,6 +230,9 @@ export const useMessagesStore = defineStore('messages', () => {
         conversationId,
         botId,
         content: '',
+        // 用模型驱动事件的当前时间作为草稿创建时间（同一 stream 第一次
+        // 创建后再不会变），渲染时按此把草稿插入 byConv 中正确的位置
+        createdAt: Date.now(),
         segments: [],
       },
     }
@@ -348,6 +353,9 @@ export const useMessagesStore = defineStore('messages', () => {
                 conversationId: f.conversationId,
                 botId: f.botId,
                 content,
+                // 沿用首次创建时刻（之后由 ensureStreamDraft 保证存在），
+                // 渲染时把草稿按 createdAt 插入到 byConv 中正确的位置
+                createdAt: Date.now(),
                 segments,
               },
             }

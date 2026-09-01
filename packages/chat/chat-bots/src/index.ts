@@ -47,9 +47,11 @@ import {
 import { saveUploadedFile } from './upload.ts'
 import {
   appendAttachments,
+  appendDocumentHint,
   attachmentKindOf,
   findImageRef,
   loadImageRefs,
+  migrateImageAttachment,
   rememberImageRefs,
   resolveWorkspaceFile,
   writeChatImage,
@@ -73,10 +75,19 @@ export { routeIdFor, ModelPreferenceStore, DEFAULT_MODEL_KEY, GROUP_JUDGE_MODEL_
 export { TREND_DAYS } from './token-usage.ts'
 export { saveUploadedFile, sanitizeFileName, MAX_UPLOAD_BYTES } from './upload.ts'
 export type { UploadedFile, UploadFailure } from './upload.ts'
+export {
+  writeChatImage,
+  readChatImage,
+  migrateImageAttachment,
+  imagesRoot,
+  attachmentKindOf,
+} from './attachments.ts'
+export type { ChatAttachmentMeta } from './attachments.ts'
 export type { TokenUsageReport, ModelUsage, DailyUsage } from './token-usage.ts'
 import { configureDebugLog, debugLog, isDebugLogEnabled, tailDebugLog, DEBUG_LOG_PATH } from './debug-log.ts'
 import { generatePersonaText, type PersonaKind } from './persona.ts'
 import { pageRows, renderPrivateHistory, translateSessionEvent } from './bridge.ts'
+import type { ChatMessageRow } from './bridge.ts'
 import { defineDomain, domainTable } from '@deepseek-ai/dsh-storage-domain'
 import type { Domain } from '@deepseek-ai/dsh-storage-domain'
 import type { BotCreateInput, BotRecord, BotUpdatePatch } from './types.ts'
@@ -171,6 +182,54 @@ export const Config: z<Config> = z.object({
     cooldownSeconds: z.natural().default(60),
   }).default(DEFAULT_TRIGGER),
 })
+
+/**
+ * Walk all image attachments in one history page; dump any whose ref is
+ * still an attachment-store id to the chat-images tree on disk. Mutates the
+ * rows in place so the bytes file path is the one the webview loads.
+ *
+ * Why the migration is needed: legacy sessions hold image refs as
+ * `att-<id>` — that's an attachment-store id, not a file path. The webview
+ * cannot render cross-origin `<img src="http://127.0.0.1:3180/...">` from a
+ * file:// origin, but it CAN load `asset://localhost/<abs-path>` once the
+ * bytes are on disk and the URL goes through `convertFileSrc`.
+ */
+async function migrateImageAttachments(
+  ctx: Context,
+  rows: readonly ChatMessageRow[],
+  botId: string,
+): Promise<ChatMessageRow[]> {
+  // 就地复制：rows 里的 attachments 是只读元组，改写 ref 需构造新对象，
+  // 避免修改上游 renderPrivateHistory 的返回值。
+  const out: ChatMessageRow[] = []
+  for (const row of rows) {
+    const items = row.attachments
+    if (items === undefined || items.length === 0) {
+      out.push(row)
+      continue
+    }
+    const next: ChatAttachmentMeta[] = []
+    for (const item of items) {
+      // 已是绝对路径（send 时写入的新格式）：原样保留。
+      if (item.kind !== 'image' || (item.ref.startsWith('/') && !item.ref.includes('/chatapi/'))) {
+        next.push(item)
+        continue
+      }
+      const attRef = findImageRef(item.ref)
+      if (attRef === undefined) {
+        next.push(item)
+        continue
+      }
+      const abs = await migrateImageAttachment(`bot-${botId}`, attRef, async () => {
+        const stored = await ctx.attachments.readImage(attRef)
+        return Buffer.from(stored.data)
+      })
+      next.push(abs === undefined ? item : { ...item, ref: abs })
+    }
+    out.push({ ...row, attachments: next })
+  }
+  return out
+}
 
 /** The durable bot-record storage domain. */
 const botsDomainSpec = defineDomain({
@@ -844,7 +903,10 @@ export class ChatBots extends Service {
           res.end(JSON.stringify(body))
         }
         try {
-          if (req.method === 'GET') return json(200, this.trace?.list() ?? [])
+          if (req.method === 'GET') return json(200, {
+            entries: this.trace?.list() ?? [],
+            uploads: this.trace?.listUploads() ?? [],
+          })
           if (req.method === 'DELETE') {
             this.trace?.clear()
             return json(200, { ok: true })
@@ -1042,7 +1104,28 @@ export class ChatBots extends Service {
             if (bot === undefined) return json(404, { error: `bot "${botId}" not found` })
             if (bot.workspaceDir === undefined) return json(400, { error: '该好友没有工作目录' })
             const result = await saveUploadedFile(bot.workspaceDir, name, data)
-            if ('error' in result) return json(400, { error: result.error })
+            // 记录上传：文档不经过归一化，sourceBytes 与实际落盘字节一致
+            const fileBytes = Buffer.from(data, 'base64').byteLength
+            const fileBot = { botId, ...(bot.name === undefined ? {} : { botName: bot.name }) }
+            if ('error' in result) {
+              this.trace?.recordUpload({
+                kind: 'file',
+                ...fileBot,
+                name,
+                sourceBytes: fileBytes,
+                bytes: 0,
+                error: result.error,
+              })
+              return json(400, { error: result.error })
+            }
+            this.trace?.recordUpload({
+              kind: 'file',
+              ...fileBot,
+              name: result.name,
+              sourceBytes: fileBytes,
+              bytes: result.size,
+              path: result.relPath,
+            })
             // 返回工作区相对路径：agent 的 cwd 就是工作区，模型可直接用
             return json(200, { path: result.relPath, name: result.name, size: result.size })
           }
@@ -1531,6 +1614,7 @@ export class ChatBots extends Service {
             /** 文档提示文本（只进模型上下文，不写回用户消息，否则气泡会多出几行）。 */
             let docHint = ''
             if (images.length > 0) {
+              const uploadBotName = this.get(botId)?.name
               const refs = await admitEncodedImages(this.ctx.attachments, images)
               content.push(...refs.map((ref): ContentBlock => ({ type: 'image', attachment: ref })))
               // 记住引用：原 attachment store 端点（保留作回退路径，旧数据 / 历史）
@@ -1542,9 +1626,27 @@ export class ChatBots extends Service {
                 const img = images[i]
                 if (ref === undefined || img === undefined) continue
                 const buf = Buffer.from(img.data, 'base64')
-                let relUrl = ''
+                // 记录上传：buf 是用户上传的原始字节，ref.bytes 是归一化后实际
+                // 入库的大小，两者差值就是压缩收益。
+                this.trace?.recordUpload({
+                  kind: 'image',
+                  botId,
+                  ...(uploadBotName === undefined ? {} : { botName: uploadBotName }),
+                  name: ref.name ?? img.name ?? `image-${i}`,
+                  sourceBytes: buf.byteLength,
+                  bytes: ref.bytes,
+                  mediaType: ref.mediaType,
+                  width: ref.width,
+                  height: ref.height,
+                  ...(ref.originalDimensions === undefined ? {} : {
+                    originalWidth: ref.originalDimensions.width,
+                    originalHeight: ref.originalDimensions.height,
+                  }),
+                  attachmentId: String(ref.attachmentId),
+                })
+                let absPath = ''
                 try {
-                  relUrl = await writeChatImage(`bot-${botId}`, img.name ?? `image-${i}`, buf)
+                  absPath = await writeChatImage(`bot-${botId}`, img.name ?? `image-${i}`, buf)
                 } catch (e: unknown) {
                   this.ctx.logger.warn('chat-bots: 写图片到磁盘失败，回退 attachment store: %o', e)
                 }
@@ -1553,8 +1655,11 @@ export class ChatBots extends Service {
                   name: ref.name ?? images[i]?.name ?? 'image',
                   mediaType: ref.mediaType,
                   size: ref.bytes,
-                  // 优先磁盘 URL；如果写盘失败，落回到 attachment id，旧路径还能用
-                  ref: relUrl !== '' ? relUrl : String(ref.attachmentId),
+                  // ref 存磁盘绝对路径。前端用 Tauri 的 convertFileSrc 转换成
+                  // asset:// URL，让 webview 直接读本地文件，绕过 webview 自身
+                  // 对跨源 http://127.0.0.1:3180 的 CORS 拒绝（仅 http:default
+                  // 能力管 fetch，不管 <img>）。写盘失败时回退到 attachment id。
+                  ref: absPath !== '' ? absPath : String(ref.attachmentId),
                 })
               }
             }
@@ -1584,16 +1689,18 @@ export class ChatBots extends Service {
             // 附件事件必须先于 followup 追加：followup 只是把消息排进 inbox，
             // 真正的 user/message 事件由 driver 稍后写入，届时才有 seq 可关联。
             appendAttachments(agent.session, meta)
+            // 文档提示作为独立 session 事件（不走 driver 的 turn 合并）：
+            // 之前用 agent.followup(plugin) 会被 driver 合并进同一个 turn 的
+            // user/message，source 也被覆盖成 'user'，于是历史渲染时
+            // 把提示文本当成用户消息渲染——气泡里出现 [文档 xxx] 已保存...
+            // 改为 session.append 自定义事件后，driver 完全不感知，渲染路径
+            // 只看到 source.kind === 'user' 的 user/message，提示从不出现在
+            // 气泡里；模型则由 systemPrompt 模板读会话 log 看到该事件内容。
             agent.followup(createUserMessage({ content, source: { kind: 'user' } }))
-            // 文档提示走 plugin followup：模型能看到，但不会出现在用户消息气泡里
-            // （history 渲染时按 source.kind !== 'user' 过滤掉）。
-            // 注意：必须在 followup 用户消息之后、agent 真正开始下一轮 turn 之前追加，
-            // 否则 driver 会把它和用户消息合到同一个 turn 的开头。
             if (docHint !== '') {
-              agent.followup(createUserMessage({
-                content: [{ type: 'text', text: docHint }],
-                source: { kind: 'plugin', plugin: 'chat-bots', form: 'notice', summary: '文档附件提示' },
-              }))
+              // forMessageSeq 暂用 0：当前的 bridge 不消费该字段，留给后续
+              // 若要把 hint 与具体消息配对的扩展点。
+              appendDocumentHint(agent.session, 0, docHint)
             }
             return json(res, 200, { accepted: true })
           }
@@ -1623,7 +1730,13 @@ export class ChatBots extends Service {
             const limit = rawLimit !== null && /^\d+$/.test(rawLimit)
               ? Math.min(Math.max(Number(rawLimit), 1), 200)
               : 50
-            const page = pageRows(renderPrivateHistory(agent.session, bot.id, bot.name), before, limit)
+            const rendered = renderPrivateHistory(agent.session, bot.id, bot.name)
+            // 一次性迁移所有 image attachment 到磁盘：旧 session 的 ref 是
+            // attachment-store id，前端无法走 asset:// 加载——这里把它们
+            // 复制到 $HOME/chat-agent-images，并把 ref 改成绝对路径，
+            // 让前端 render 时直接通过 convertFileSrc 渲染。
+            const rows = await migrateImageAttachments(this.ctx, rendered, botId)
+            const page = pageRows(rows, before, limit)
             return json(res, 200, { items: page.items, hasMore: page.hasMore })
           }
 
