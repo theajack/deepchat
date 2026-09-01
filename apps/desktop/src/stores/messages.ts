@@ -19,6 +19,12 @@ export interface StreamDraft {
   draftId: string
   conversationId: string
   botId: string
+  /**
+   * 触发该回复的用户消息本地 id（send 时分配）。多个用户消息连续发送时，
+   * 各自触发的草稿会消费各自挂起的锚点——渲染时把草稿排在它指向的用户
+   * 消息之后。
+   */
+  anchorMsgId?: string
   content: string
   /** 草稿创建时间（用于按 createdAt 排序，插入到 byConv 中正确的位置） */
   createdAt: number
@@ -202,8 +208,43 @@ export const useMessagesStore = defineStore('messages', () => {
     images?: Array<{ mediaType: string; data: string; name?: string; size?: number }>,
     attachments?: MessageAttachment[],
   ) {
-    const msg = await chatApi.sendMessage(conversationId, content, images, attachments)
-    append(msg)
+    // 本地 id：占位 + 锚点（stream draft 据此把回复插在用户消息之后）
+    const localId = crypto.randomUUID()
+    pendingAnchors.push({ localMsgId: localId, conversationId })
+    // 先把 placeholder 推进 byConv —— 立即让输入框后的 UI 看到这条消息，
+    // 同时为后面的回复提供锚定位置。等后端确认后用真实 id 替换。
+    append({
+      id: localId,
+      conversation_id: conversationId,
+      sender_type: 'user',
+      sender_id: 'me',
+      sender_name: 'me',
+      content,
+      content_type: 'text',
+      is_self: 1,
+      created_at: Date.now(),
+      ...(attachments !== undefined && attachments.length > 0 ? { attachments } : {}),
+    })
+    const real = await chatApi.sendMessage(conversationId, content, images, attachments)
+    // 真实 msg 到达：用真实 id 替换本地占位（content 已带附件，省去重发）
+    if (real.id !== localId) {
+      const list = byConv.value[conversationId] ?? []
+      const idx = list.findIndex(m => m.id === localId)
+      if (idx !== -1) {
+        const next = list.slice()
+        next[idx] = { ...next[idx], id: real.id }
+        byConv.value = { ...byConv.value, [conversationId]: next }
+      }
+      // 锚点也跟着重命名（draftId/anchorMsgId 之间的对应不变）
+      for (let i = 0; i < pendingAnchors.length; i++) {
+        const a = pendingAnchors[i]
+        if (a === undefined) continue
+        if (a.localMsgId === localId) {
+          pendingAnchors.splice(i, 1, { ...a, localMsgId: real.id })
+          break
+        }
+      }
+    }
   }
 
   /** 终止正在生成的 AI 回复（botId 省略则终止该会话所有 bot） */
@@ -218,17 +259,49 @@ export const useMessagesStore = defineStore('messages', () => {
     byConv.value = { ...byConv.value, [msg.conversation_id]: [...list, msg] }
   }
 
+  /**
+ * FIFO 队列：每个挂起项是 `{ localMsgId, conversationId }`。
+ *
+ * send() 推一个进来；`message.stream` 帧首次为该 conversationId 创建 draft 时，
+ * 按 FIFO 取一个挂起，把对应的本地 id 写进 draft.anchorMsgId。
+ *
+ * 私聊场景（一个 bot）下这是精确配对；群聊场景下多个 bot 的回复也会按入队
+ * 顺序认领各自锚点，因为同一时刻不会出现多个 draft 同时被首次创建（驱动串行）。
+ */
+  const pendingAnchors: Array<{ localMsgId: string; conversationId: string }> = []
+
+  /**
+ * Claim the next pending anchor for `conversationId`, if any. Called when a
+ * new stream draft is created.
+ */
+  function takeAnchor(conversationId: string): string | undefined {
+    for (let i = 0; i < pendingAnchors.length; i++) {
+      const a = pendingAnchors[i]
+      if (a === undefined) continue
+      if (a.conversationId === conversationId) {
+        pendingAnchors.splice(i, 1)
+        return a.localMsgId
+      }
+    }
+    return undefined
+  }
+
   /** 工具事件早于首个文本 delta 到达时创建空草稿（content 为空、segments 为空），
    *  让工具卡片在模型生成工具参数期间即可见（如 write 大文件流式预览） */
   function ensureStreamDraft(draftId: string, conversationId?: string, botId?: string) {
     if (streams.value[draftId]) return
     if (!conversationId || !botId) return
+    const anchorMsgId = takeAnchor(conversationId)
     streams.value = {
       ...streams.value,
       [draftId]: {
         draftId,
         conversationId,
         botId,
+        // 用户消息 id（send 时本地分配）：草稿据此插入到 byConv 中
+        // 该用户消息之后。多个用户消息连续发送时，每个草稿消费一个挂起，
+        // 保证回复分别落在各自的用户消息下方。
+        anchorMsgId,
         content: '',
         // 用模型驱动事件的当前时间作为草稿创建时间（同一 stream 第一次
         // 创建后再不会变），渲染时按此把草稿插入 byConv 中正确的位置
@@ -239,7 +312,8 @@ export const useMessagesStore = defineStore('messages', () => {
   }
 
   /** 将 tool 段插入流式草稿的时间线（若已存在则跳过），保证工具调用与文本按时间顺序排列 */
-  function upsertToolSegment(draftId: string, toolId: string) {    const draft = streams.value[draftId]
+  function upsertToolSegment(draftId: string, toolId: string) {
+    const draft = streams.value[draftId]
     if (!draft) return
     if (draft.segments.some(s => s.type === 'tool' && s.toolId === toolId)) return
     streams.value = {
@@ -346,16 +420,14 @@ export const useMessagesStore = defineStore('messages', () => {
             const content = f.reasoning
               ? prev?.content ?? ''
               : (prev?.content ?? '') + f.delta
+            // 首次创建草稿：让 ensureStreamDraft 负责挂起挂载（pendingAnchors
+            // FIFO 消费），确保草稿锚定到正确的用户消息。
+            ensureStreamDraft(f.messageId, f.conversationId, f.botId)
             streams.value = {
               ...streams.value,
               [f.messageId]: {
-                draftId: f.messageId,
-                conversationId: f.conversationId,
-                botId: f.botId,
+                ...(streams.value[f.messageId] ?? { draftId: f.messageId, conversationId: f.conversationId, botId: f.botId }),
                 content,
-                // 沿用首次创建时刻（之后由 ensureStreamDraft 保证存在），
-                // 渲染时把草稿按 createdAt 插入到 byConv 中正确的位置
-                createdAt: Date.now(),
                 segments,
               },
             }

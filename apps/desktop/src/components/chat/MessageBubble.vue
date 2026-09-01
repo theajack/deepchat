@@ -614,12 +614,14 @@ const usageText = computed(() => {
             <button
               v-else
               type="button"
-              class="flex max-w-full cursor-pointer items-center gap-2 rounded-lg border border-line/50 bg-ink-2/40 px-2 py-1.5 transition-colors hover:border-accent/40"
+              class="group/att flex max-w-full cursor-pointer items-center gap-2 rounded-lg border border-line/70 bg-ink-1/55 px-2.5 py-1.5 transition-colors hover:border-accent/45 hover:bg-ink-1/80"
               @click="openAttachment(att)"
             >
-              <FileText :size="16" class="shrink-0 text-mid" />
-              <span class="truncate text-xs text-hi">{{ att.name }}</span>
-              <span class="font-num shrink-0 text-[10px] text-lo">{{ formatSize(att.size) }}</span>
+              <span class="flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-accent/15 text-accent transition-colors group-hover/att:bg-accent/25">
+                <FileText :size="13" />
+              </span>
+              <span class="truncate text-xs font-medium text-hi">{{ att.name }}</span>
+              <span class="font-num shrink-0 text-[11px] text-mid">{{ formatSize(att.size) }}</span>
             </button>
           </template>
         </div>

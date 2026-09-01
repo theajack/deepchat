@@ -121,6 +121,8 @@ const rows = computed<Row[]>(() => {
     botId: string
     content: string
     segments: StreamSegment[]
+    /** 触发该回复的用户消息 id（store 中挂起消费所得），用于排序 */
+    anchorMsgId?: string
     createdAt: number
   }
   type PersistedRow = {
@@ -128,27 +130,55 @@ const rows = computed<Row[]>(() => {
     msg: typeof list[number]
   }
   type Source = StreamRow | PersistedRow
-  const sources: Source[] = []
-  for (const m of list) {
-    sources.push({ kind: "msg", msg: m })
-  }
+
+  // 先把草稿按锚点分组，再构造 sources：**每条用户消息后面紧跟它的草稿**。
+  // 配合 ES2019+ 保证的稳定排序，即便虚拟时间完全相同（用户在 1ms 内连发
+  // 两条），相等项也保持这里的插入顺序 —— 消息在前、它的回复在后。
+  const draftsByAnchor = new Map<string, StreamRow[]>()
+  const orphanDrafts: StreamRow[] = []
   for (const draft of Object.values(messages.streams)) {
     if (draft.conversationId !== convId) continue
-    sources.push({
+    const row: StreamRow = {
       kind: "stream",
       draftId: draft.draftId,
       conversationId: draft.conversationId,
       botId: draft.botId,
       content: draft.content,
       segments: draft.segments,
+      anchorMsgId: draft.anchorMsgId,
       createdAt: draft.createdAt,
-    })
+    }
+    const anchor = draft.anchorMsgId
+    if (anchor === undefined) {
+      orphanDrafts.push(row)
+      continue
+    }
+    const bucket = draftsByAnchor.get(anchor)
+    if (bucket === undefined) draftsByAnchor.set(anchor, [row])
+    else bucket.push(row)
   }
-  sources.sort((a, b) => {
-    const at = a.kind === "msg" ? a.msg.created_at : a.createdAt
-    const bt = b.kind === "msg" ? b.msg.created_at : b.createdAt
-    return at - bt
-  })
+
+  const sources: Source[] = []
+  for (const m of list) {
+    sources.push({ kind: "msg", msg: m })
+    for (const d of draftsByAnchor.get(m.id) ?? []) sources.push(d)
+  }
+  // 没有锚点的草稿放最后（历史消息 / 群聊调度等场景），不至于丢失
+  for (const d of orphanDrafts) sources.push(d)
+
+  // 虚拟时间：用户消息用 created_at；草稿用其锚点消息的 created_at（相等时
+  // 靠上面的插入顺序 + 稳定排序保证 "消息 → 它的回复"）。无锚点回退 createdAt。
+  const msgById = new Map<string, number>()
+  for (const m of list) msgById.set(m.id, m.created_at)
+  const virtualTime = (src: Source): number => {
+    if (src.kind === "msg") return src.msg.created_at
+    if (src.anchorMsgId !== undefined) {
+      const anchor = msgById.get(src.anchorMsgId)
+      if (anchor !== undefined) return anchor
+    }
+    return src.createdAt
+  }
+  sources.sort((a, b) => virtualTime(a) - virtualTime(b))
 
   const result: Row[] = []
   let lastRenderedTime: number | null = null

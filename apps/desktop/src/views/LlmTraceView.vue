@@ -1,11 +1,14 @@
 <script setup lang="ts">
 import { onBeforeUnmount, onMounted, ref } from "vue";
-import { RotateCw, Trash2, ChevronDown, ChevronRight, Wrench, MessageSquare, Cpu, Terminal, Brain, FileText } from "lucide-vue-next";
+import { RotateCw, Trash2, ChevronDown, ChevronRight, Wrench, MessageSquare, Cpu, Terminal, Brain, FileText, Upload, Image as ImageIcon } from "lucide-vue-next";
 import SectionBlock from "../components/debug/SectionBlock.vue";
-import { agentApi, type LlmTraceEntry } from "../services/agentApi";
+import { agentApi, type LlmTraceEntry, type UploadTraceEntry } from "../services/agentApi";
 import { t } from "../i18n";
 
 const traces = ref<LlmTraceEntry[]>([]);
+const uploads = ref<UploadTraceEntry[]>([]);
+/** 上传记录区块是否展开 */
+const uploadsOpen = ref(false);
 const loading = ref(false);
 const error = ref("");
 /** 展开的条目 id 集合 */
@@ -19,7 +22,9 @@ async function refresh() {
   loading.value = true;
   error.value = "";
   try {
-    traces.value = await agentApi.llmTraceList();
+    const snap = await agentApi.llmTraceList();
+    traces.value = snap?.entries ?? [];
+    uploads.value = snap?.uploads ?? [];
   } catch (e) {
     error.value = e instanceof Error ? e.message : String(e);
   } finally {
@@ -31,10 +36,32 @@ async function clearAll() {
   try {
     await agentApi.llmTraceClear();
     traces.value = [];
+    uploads.value = [];
     expanded.value = new Set();
   } catch (e) {
     error.value = e instanceof Error ? e.message : String(e);
   }
+}
+
+/** 人类可读的字节数 */
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(2)} MB`;
+}
+
+/** 归一化节省的百分比；未压缩时返回 null */
+function savedPercent(sourceBytes: number, bytes: number): number | null {
+  if (sourceBytes <= 0 || bytes >= sourceBytes) return null;
+  return Math.round((1 - bytes / sourceBytes) * 100);
+}
+
+/** 图片尺寸描述：有压缩时展示 原始 → 实际 */
+function dimLabel(u: UploadTraceEntry): string {
+  if (u.width === undefined || u.height === undefined) return "";
+  const after = `${u.width}×${u.height}`;
+  if (u.originalWidth === undefined || u.originalHeight === undefined) return after;
+  return `${u.originalWidth}×${u.originalHeight} → ${after}`;
 }
 
 function toggle(id: string) {
@@ -108,7 +135,53 @@ onBeforeUnmount(() => {
     <div class="min-h-0 flex-1 overflow-y-auto px-4 py-3">
       <p v-if="error" class="rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-[12px] text-red-400">{{ error }}</p>
 
-      <div v-if="!traces.length && !loading" class="flex h-full flex-col items-center justify-center gap-2 text-lo">
+      <!-- 上传记录（图片 / 文件） -->
+      <div v-if="uploads.length" class="mb-3 overflow-hidden rounded-xl border border-line bg-ink-2/40">
+        <button class="flex w-full items-center gap-1.5 px-3 py-2 text-left" @click="uploadsOpen = !uploadsOpen">
+          <component :is="uploadsOpen ? ChevronDown : ChevronRight" :size="14" class="shrink-0 text-mid" />
+          <Upload :size="13" class="shrink-0 text-accent" />
+          <span class="text-[12px] font-semibold text-hi">{{ t("debug.uploadsTitle") }}</span>
+          <span class="rounded bg-ink-1 px-1.5 py-0.5 font-mono text-[10px] text-lo">{{ uploads.length }}</span>
+        </button>
+        <div v-if="uploadsOpen" class="flex flex-col gap-1 border-t border-line px-3 py-2">
+          <div
+            v-for="u in uploads"
+            :key="u.id"
+            class="rounded-md bg-ink-1/50 px-2 py-1.5"
+          >
+            <div class="flex items-center gap-1.5">
+              <component :is="u.kind === 'image' ? ImageIcon : FileText" :size="12" class="shrink-0 text-accent" />
+              <span class="truncate text-[11.5px] font-medium text-hi">{{ u.name }}</span>
+              <span class="shrink-0 rounded bg-ink-2 px-1 py-0.5 font-mono text-[9.5px] text-lo">{{ u.kind === "image" ? t("debug.kindImage") : t("debug.kindFile") }}</span>
+              <div class="flex-1" />
+              <span v-if="u.error" class="shrink-0 rounded bg-danger/15 px-1.5 py-0.5 text-[10px] text-danger">error</span>
+              <span class="shrink-0 font-mono text-[10.5px] text-lo">{{ fmtTime(u.ts) }}</span>
+            </div>
+            <div class="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 font-mono text-[10.5px] text-lo">
+              <!-- 图片：类型 / 尺寸（压缩前后）/ 大小（压缩前后） -->
+              <template v-if="u.kind === 'image'">
+                <span>{{ u.mediaType }}</span>
+                <span v-if="dimLabel(u)">{{ dimLabel(u) }}</span>
+                <span>
+                  {{ formatBytes(u.sourceBytes) }}<template v-if="u.bytes !== u.sourceBytes"> → {{ formatBytes(u.bytes) }}</template>
+                </span>
+                <span v-if="savedPercent(u.sourceBytes, u.bytes) !== null" class="text-emerald-400">
+                  -{{ savedPercent(u.sourceBytes, u.bytes) }}%
+                </span>
+              </template>
+              <!-- 文件：大小 / 落盘路径 -->
+              <template v-else>
+                <span>{{ formatBytes(u.bytes) }}</span>
+                <span v-if="u.path" class="truncate">→ {{ u.path }}</span>
+              </template>
+              <span v-if="u.botName" class="text-mid">{{ u.botName }}</span>
+            </div>
+            <p v-if="u.error" class="mt-0.5 font-mono text-[10.5px] text-red-400">{{ u.error }}</p>
+          </div>
+        </div>
+      </div>
+
+      <div v-if="!traces.length && !loading && !uploads.length" class="flex h-full flex-col items-center justify-center gap-2 text-lo">
         <MessageSquare :size="36" :stroke-width="1.2" class="text-accent/30" />
         <p class="text-[13px]">{{ t("debug.llmTraceEmpty") }}</p>
       </div>
@@ -147,6 +220,37 @@ onBeforeUnmount(() => {
                 <div v-for="(m, i) in e.input" :key="i" class="rounded-md bg-ink-1/50 px-2 py-1.5">
                   <span class="mr-1.5 inline-block rounded bg-ink-2 px-1 py-0.5 font-mono text-[9.5px] text-lo">{{ m.role }}</span>
                   <pre class="mt-1 whitespace-pre-wrap break-words font-sans text-[11.5px] leading-relaxed text-hi">{{ m.content }}</pre>
+                </div>
+              </div>
+            </SectionBlock>
+
+            <!-- 本次调用携带的图片（模型实际收到的尺寸 / 字节） -->
+            <SectionBlock
+              v-if="e.attachments?.length"
+              :title="t('debug.imagesTitle')"
+              :icon="ImageIcon"
+              variant="input"
+              :count="`${e.attachments.length} 张`"
+            >
+              <div class="flex flex-col gap-1">
+                <p class="mb-0.5 text-[10px] leading-relaxed text-lo/70">{{ t("debug.imagesNote") }}</p>
+                <div v-for="(img, i) in e.attachments" :key="i" class="rounded-md bg-ink-1/50 px-2 py-1.5">
+                  <div class="flex items-center gap-1.5">
+                    <ImageIcon :size="12" class="shrink-0 text-accent" />
+                    <span class="truncate text-[11.5px] text-hi">{{ img.name ?? img.mediaType }}</span>
+                    <span class="shrink-0 rounded bg-ink-2 px-1 py-0.5 font-mono text-[9.5px] text-lo">{{ img.mediaType }}</span>
+                    <span
+                      v-if="img.originalWidth !== undefined"
+                      class="shrink-0 rounded bg-amber-500/15 px-1 py-0.5 text-[9.5px] text-amber-300"
+                    >{{ t("debug.normalized") }}</span>
+                  </div>
+                  <div class="mt-0.5 flex flex-wrap items-center gap-x-2 font-mono text-[10.5px] text-lo">
+                    <span>
+                      {{ img.originalWidth !== undefined ? `${img.originalWidth}×${img.originalHeight} → ` : "" }}{{ img.width }}×{{ img.height }}
+                    </span>
+                    <span>{{ formatBytes(img.bytes) }}</span>
+                  </div>
+                  <p class="mt-0.5 truncate font-mono text-[10px] text-lo/70">id: {{ img.attachmentId }}</p>
                 </div>
               </div>
             </SectionBlock>

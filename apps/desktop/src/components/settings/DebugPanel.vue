@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from "vue";
-import { Globe, Play, Loader2, CheckCircle2, XCircle, ExternalLink, MessageSquareText, Bug, ScrollText, FolderOpen, RefreshCw } from "lucide-vue-next";
+import { Globe, Play, Loader2, CheckCircle2, XCircle, ExternalLink, MessageSquareText, Bug, ScrollText, FolderOpen, RefreshCw, Image as ImageIcon, FileText } from "lucide-vue-next";
 import { openUrl, openUrlBuiltin, openUrlSystem, type BrowserPref } from "../../utils/browser";
 import { openLlmTraceWindow } from "../../utils/llmTrace";
 import { useSettingsStore } from "../../stores/settings";
@@ -127,8 +127,34 @@ async function openLogDir() {
   }
 }
 
+/** 人类可读的字节数 */
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(2)} MB`;
+}
+
+/**
+ * 上传统计（图片 / 文件）。宿主在内存环形缓冲里记录最近 50 条上传，
+ * 这里只取计数与合计字节，明细在「对话信息」窗口里展开查看。
+ */
+const uploadStats = ref({ images: 0, files: 0, bytes: 0 });
+
+async function refreshUploadStats() {
+  try {
+    const snap = await agentApi.llmTraceList();
+    const list = snap?.uploads ?? [];
+    uploadStats.value = {
+      images: list.filter((u) => u.kind === "image").length,
+      files: list.filter((u) => u.kind === "file").length,
+      bytes: list.reduce((sum, u) => sum + u.bytes, 0),
+    };
+  } catch { /* 宿主未就绪时忽略 */ }
+}
+
 onMounted(() => {
   if (debugLogEnabled.value) void refreshLogInfo();
+  void refreshUploadStats();
 });
 </script>
 
@@ -212,6 +238,30 @@ onMounted(() => {
       <h3 class="text-[13px] font-semibold tracking-wide text-hi">{{ t("debug.llmTraceTitle") }}</h3>
     </div>
     <p class="mt-1 text-xs text-lo">{{ t("debug.llmTraceDesc") }}</p>
+
+    <!-- 上传统计：图片 / 文件（明细在追踪窗口里展开） -->
+    <div v-if="uploadStats.images || uploadStats.files" class="mt-2.5 flex flex-wrap items-center gap-1.5">
+      <span class="flex items-center gap-1 rounded-md border border-line bg-ink-1/40 px-2 py-1 text-[11px] text-mid">
+        <ImageIcon :size="11" class="text-accent" />
+        {{ t("debug.statImages", { count: uploadStats.images }) }}
+      </span>
+      <span class="flex items-center gap-1 rounded-md border border-line bg-ink-1/40 px-2 py-1 text-[11px] text-mid">
+        <FileText :size="11" class="text-accent" />
+        {{ t("debug.statFiles", { count: uploadStats.files }) }}
+      </span>
+      <span class="rounded-md border border-line bg-ink-1/40 px-2 py-1 font-mono text-[11px] text-lo">
+        {{ formatBytes(uploadStats.bytes) }}
+      </span>
+      <button
+        class="rounded-md px-1.5 py-1 text-[11px] text-lo transition-colors hover:text-accent"
+        :title="t('debug.refresh')"
+        @click="refreshUploadStats"
+      >
+        <RefreshCw :size="11" />
+      </button>
+    </div>
+    <p v-else class="mt-2 text-[11px] text-lo/70">{{ t("debug.uploadsEmpty") }}</p>
+
     <button
       class="mt-3 flex items-center gap-1.5 rounded-lg bg-gradient-to-br from-accent to-accent-deep px-4 py-2 text-[12.5px] font-medium text-on-accent transition-opacity hover:opacity-90"
       @click="openLlmTraceWindow"
