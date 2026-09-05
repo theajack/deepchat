@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from "vue";
-import { MessageCircle, Pencil, Plus, Search, Trash2, UserPlus, Users, X, Cpu } from "lucide-vue-next";
+import { Copy, MessageCircle, Pencil, Plus, Search, Trash2, UserPlus, Users, X, Cpu } from "lucide-vue-next";
 import Avatar from "../components/common/Avatar.vue";
 import GroupAvatar from "../components/contacts/GroupAvatar.vue";
 import BotAgentBadge from "../components/contacts/BotAgentBadge.vue";
@@ -18,6 +18,7 @@ import type { Bot } from "../types";
 import { formatDateTime } from "../utils/display";
 import { showBotDetail, hideBotDetail } from "../utils/botDetailHover";
 import HoverTip from "../components/common/HoverTip.vue";
+import ContextMenu, { type ContextMenuState } from "../components/common/ContextMenu.vue";
 import { t } from "../i18n";
 
 const app = useAppStore();
@@ -41,6 +42,8 @@ function groupMemberAvatars(id: string): { name: string; avatar: string | null }
 const keyword = ref("");
 const selectedBotId = ref<string | null>(null);
 const selectedGroupId = ref<string | null>(null);
+/** 正在克隆好友（服务端要跑一次会话总结，需要给用户等待反馈） */
+const cloning = ref(false);
 
 /** 根据 model_id 查找模型显示名 */
 function modelName(bot: Bot): string {
@@ -217,17 +220,89 @@ async function removeBot(bot: Bot) {
   });
 }
 
+/**
+ * 克隆好友：复制配置与长期记忆；历史会话不复制，但服务端会立刻把它总结
+ * 进克隆体的记忆文件。总结是一次 LLM 调用，所以需要等待反馈。
+ */
+async function cloneBot(bot: Bot) {
+  if (cloning.value) return;
+  cloning.value = true;
+  try {
+    const created = await bots.clone(bot.id);
+    // 选中克隆体，方便立刻查看它继承了什么
+    selectedBotId.value = created.id;
+    selectedGroupId.value = null;
+    // 列表可能正被搜索关键字过滤，克隆体的名字未必命中当前关键字。
+    // 清空关键字，否则会出现"克隆成功但列表没反应"。
+    if (keyword.value.trim() !== "") keyword.value = "";
+    // 成功提示由 bots.clone() 统一发出（会话列表入口也走同一路径）
+
+    // 与新建好友一致：立刻建立会话并跳转，让克隆体可以马上开聊
+    const conv = await conversations.createPrivate(created.id);
+    app.navigate("chat");
+    await conversations.select(conv.id);
+  } catch (e) {
+    app.toast(e instanceof Error ? e.message : String(e));
+  } finally {
+    cloning.value = false;
+  }
+}
+
 async function removeGroup(group: { id: string; name: string }) {
   requestConfirm({
     title: t("contacts.deleteGroup.title"),
     message: t("contacts.deleteGroup.message", { name: group.name }),
-    confirmText: t("common.delete"),
+    confirmText: t("common.disband"),
     action: async () => {
       if (selectedGroupId.value === group.id) selectedGroupId.value = null;
       await conversations.remove(group.id);
       app.toast(t("contacts.deletedGroup"));
     },
   });
+}
+
+// ---------- 列表右键菜单 ----------
+const menuState = ref<ContextMenuState | null>(null);
+const menuTarget = ref<ContactItem | null>(null);
+
+/**
+ * 列表项右键菜单。好友与群聊的可用操作不同，故按 kind 分别构造。
+ * 删除/解散动作本身已内置二次确认（见 removeBot / removeGroup），
+ * 这里直接转发即可，不重复弹窗。
+ */
+function onContextMenu(e: MouseEvent, item: ContactItem) {
+  e.preventDefault();
+  e.stopPropagation();
+  menuTarget.value = item;
+  menuState.value = {
+    x: e.clientX,
+    y: e.clientY,
+    groups: [
+      {
+        items:
+          item.kind === "bot"
+            ? [
+              { key: "clone", label: t("contacts.menu.cloneBot") },
+              { key: "delete", label: t("contacts.menu.deleteBot"), danger: true },
+            ]
+            : [{ key: "disband", label: t("contacts.menu.disbandGroup"), danger: true }],
+      },
+    ],
+  };
+}
+
+function onMenuSelect(key: string) {
+  const item = menuTarget.value;
+  if (!item) return;
+  if (item.kind === "group") {
+    if (key === "disband") removeGroup({ id: item.id, name: item.name });
+    return;
+  }
+  // 列表项只携带 id，克隆/删除需要完整的 Bot 对象
+  const bot = bots.items.find((b) => b.id === item.id);
+  if (!bot) return;
+  if (key === "clone") void cloneBot(bot);
+  else if (key === "delete") removeBot(bot);
 }
 
 // ---------- 群聊成员与介绍管理 ----------
@@ -303,6 +378,7 @@ async function removeMember(bot: Bot) {
           class="group relative mx-2 mb-0.5 flex cursor-pointer items-center gap-3 rounded-lg px-2.5 py-2.5 transition-all duration-150 hover:bg-ink-3/70"
           :class="{ '!bg-ink-4': isActive(it) }"
           @click="selectItem(it)"
+          @contextmenu="onContextMenu($event, it)"
         >
           <span
             v-if="isActive(it)"
@@ -362,17 +438,6 @@ async function removeMember(bot: Bot) {
               </div>
             </section>
 
-            <section v-if="selectedBot.skills.length" class="mt-5">
-              <h3 class="mb-2 text-xs font-medium uppercase tracking-wider text-lo">{{ t("contacts.skills") }}</h3>
-              <div class="flex flex-wrap gap-2">
-                <span
-                  v-for="skill in selectedBot.skills"
-                  :key="skill"
-                  class="rounded-lg border border-line bg-ink-3/80 px-3 py-1.5 text-[12px] text-mid"
-                >{{ skill }}</span>
-              </div>
-            </section>
-
             <section class="mt-5">
               <h3 class="mb-2 text-xs font-medium uppercase tracking-wider text-lo">{{ t("contacts.createdAt") }}</h3>
               <div class="font-num text-[13px] text-mid">{{ formatDateTime(selectedBot.created_at) }}</div>
@@ -391,6 +456,14 @@ async function removeMember(bot: Bot) {
                 @click="app.openBotEditor(selectedBot)"
               >
                 <Pencil :size="16" />
+              </button>
+              <button
+                class="flex items-center justify-center rounded-xl border border-line-strong/50 px-4 py-2.5 text-mid transition-colors hover:border-accent/40 hover:bg-ink-3 hover:text-hi disabled:cursor-not-allowed disabled:opacity-50"
+                :title="t('contacts.cloneBot')"
+                :disabled="cloning"
+                @click="cloneBot(selectedBot)"
+              >
+                <Copy :size="16" />
               </button>
               <button
                 class="flex items-center justify-center rounded-xl border border-line-strong/50 px-4 py-2.5 text-mid transition-colors hover:border-danger/50 hover:bg-danger/10 hover:text-danger"
@@ -621,5 +694,8 @@ async function removeMember(bot: Bot) {
       @confirm="onConfirm"
       @close="confirmState = null"
     />
+
+    <!-- 列表右键菜单（好友：复制/删除；群聊：解散） -->
+    <ContextMenu :state="menuState" @close="menuState = null" @select="onMenuSelect" />
   </div>
 </template>

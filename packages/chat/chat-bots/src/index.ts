@@ -130,6 +130,54 @@ const DEFAULT_TRIGGER: NonNullable<Config['defaultTrigger']> = {
   activeRate: 0.3, keywords: [], cooldownSeconds: 60,
 }
 
+/** Separator between a bot's base name and its clone counter. */
+const CLONE_SEP = '-'
+/**
+ * Fallback clone word when the caller supplies none.
+ *
+ * The host has no i18n service, so the UI is expected to pass its localized
+ * word; this keeps older clients (and direct API callers) working.
+ */
+const CLONE_SUFFIX_FALLBACK = '克隆体'
+
+/**
+ * Work out the name for the next clone of `sourceName`.
+ *
+ * Reuses the original base name so a chain stays readable, and bumps an
+ * existing counter instead of piling suffixes on:
+ *
+ * ```
+ * 小艺              → 小艺-克隆体
+ * 小艺-克隆体       → 小艺-克隆体2
+ * 小艺-克隆体2      → 小艺-克隆体3
+ * 小艺-克隆体2-副本 → 小艺-克隆体3   (trailing junk after the counter is dropped)
+ * ```
+ *
+ * @param suffix - localized "clone" word, e.g. `克隆体` or `Clone`.
+ */
+export function nextCloneName(sourceName: string, suffix: string): string {
+  const word = suffix.trim() === '' ? CLONE_SUFFIX_FALLBACK : suffix.trim()
+  // 形如 `名字-克隆体` 或 `名字-克隆体12`（数字可选）
+  const pattern = new RegExp(`^(.*)${CLONE_SEP}${escapeRegExp(word)}(\\d*)$`)
+  const match = pattern.exec(sourceName)
+
+  // 尚未带克隆后缀：直接追加一份
+  if (match === null) return `${sourceName}${CLONE_SEP}${word}`
+
+  const base = match[1] ?? ''
+  // 空基名意味着用户把好友整个改名成了克隆词，退化为"补一份"而非丢弃名字
+  if (base === '') return `${sourceName}${CLONE_SEP}${word}`
+
+  const current = match[2] ?? ''
+  // 首次再加一份 → 2；已有数字 → +1
+  return `${base}${CLONE_SEP}${word}${String(current === '' ? 2 : Number(current) + 1)}`
+}
+
+/** Escape regex metacharacters so an arbitrary clone word is matched literally. */
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
 /** Front-end model shape (snake_case, mirroring the legacy `ai_models` row). */
 function toFrontModel(record: ModelRecord): Record<string, unknown> {
   return {
@@ -558,6 +606,118 @@ export class ChatBots extends Service {
     await mkdir(workspaceDir, { recursive: true })
     await this.store.table('bots').put(record.id, record)
     return record
+  }
+
+  /**
+   * Clone a bot: identical configuration, fresh identity.
+   *
+   * The clone gets a new id (hence its own avatar directory and workspace) and
+   * a new session id — so the chat history is deliberately NOT copied and the
+   * two start apart. Names go through {@link nextCloneName}, which reuses the
+   * source's base name and bumps an existing clone counter:
+   *
+   * ```
+   * 小艺            → 小艺-克隆体
+   * 小艺-克隆体     → 小艺-克隆体2
+   * 小艺-克隆体2    → 小艺-克隆体3
+   * 小艺-克隆体2-副本 → 小艺-克隆体3   (trailing counter is replaced)
+   * ```
+   *
+   * What IS carried over: every configuration field, the avatar image, and the
+   * long-term memory. Since the transcript itself is dropped, the source's
+   * conversation is distilled into the clone's memory right away, reusing the
+   * same consolidation the "clear chat" path runs. The clone therefore keeps
+   * the relationship without inheriting the log.
+   *
+   * @param suffix - localized "clone" word supplied by the UI, which owns
+   * locale state. Kept as a parameter because the host has no i18n service.
+   */
+  async clone(id: string, suffix = CLONE_SUFFIX_FALLBACK): Promise<BotRecord> {
+    const source = this.get(id)
+    if (source === undefined) throw new Error(`chat-bots: bot "${id}" not found`)
+
+    // 1) 复制全部配置；身份字段（id / sessionId / createdAt）由 create 重新铸造。
+    //    不传 workspaceDir，克隆体因此拿到自己的默认工作区，不与源共享。
+    let created = await this.create({
+      name: nextCloneName(source.name, suffix),
+      ...(source.avatar !== undefined ? { avatar: source.avatar } : {}),
+      persona: source.persona,
+      provider: source.provider,
+      model: source.model,
+      ...(source.introduction !== undefined ? { introduction: source.introduction } : {}),
+      ...(source.agentEnabled !== undefined ? { agentEnabled: source.agentEnabled } : {}),
+      ...(source.enabledTools !== undefined ? { enabledTools: [...source.enabledTools] } : {}),
+      ...(source.enabledSkills !== undefined ? { enabledSkills: [...source.enabledSkills] } : {}),
+      ...(source.enabledMcpServers !== undefined ? { enabledMcpServers: [...source.enabledMcpServers] } : {}),
+      trigger: { ...source.trigger },
+    })
+
+    // 2) 头像：URL 内嵌 bot id，必须复制物理文件后重写，不能共用字段值
+    const avatar = await this.copyAvatar(source, created)
+    if (avatar !== undefined) {
+      created = { ...created, avatar }
+      await this.store.table('bots').put(created.id, created)
+    }
+
+    // 3) 记忆：先落一份源记忆，作为下一步整合的「已有记忆」
+    const sourceMemory = await readMemory(source.workspaceDir)
+    if (sourceMemory !== '') await writeMemory(created.workspaceDir, sourceMemory)
+
+    // 4) 立刻把源会话蒸馏进克隆体的记忆（历史会话不复制，只留下沉淀）
+    await this.distillSourceInto(source, created)
+
+    return created
+  }
+
+  /**
+   * Copy the source's avatar image into the clone's own directory.
+   *
+   * Avatar URLs embed the bot id (`/chatapi/avatars/{id}/avatar.ext`), so
+   * sharing the field value would leave the clone pointing at the original's
+   * file — fine today, broken the moment the original is deleted. Built-in
+   * avatars have no file on disk, so their id is simply reused.
+   */
+  private async copyAvatar(source: BotRecord, clone: BotRecord): Promise<string | undefined> {
+    if (clone.workspaceDir === undefined) return undefined
+    const match = /^\/chatapi\/avatars\/([^/]+)\/avatar\.([a-z]{2,5})$/.exec(source.avatar ?? '')
+    if (match === null || match[1] === undefined || match[2] === undefined) return undefined
+    const ext = match[2]
+    const bytes = await readFile(join(this.avatarDir, match[1], `avatar.${ext}`)).catch(() => null)
+    if (bytes === null) return undefined
+    // svg 的 MIME 带 +xml，不能简单拼成 image/{ext}
+    const mime = ext === 'jpg' ? 'image/jpeg' : ext === 'svg' ? 'image/svg+xml' : `image/${ext}`
+    const { avatar } = await writeBotAvatar(clone.workspaceDir, `data:${mime};base64,${bytes.toString('base64')}`)
+    return avatar
+  }
+
+  /**
+   * Distill the source's conversation into the clone's memory, right now.
+   *
+   * The clone starts with an empty log, so without this it would lose
+   * everything the pair had been through. Its memory already holds a copy of
+   * the source's document at this point, and consolidation merges the
+   * transcript with that existing memory into one rewritten document.
+   *
+   * Failures are swallowed: a clone missing the distilled summary still keeps
+   * the copied memory, so cloning itself must not fail.
+   */
+  private async distillSourceInto(source: BotRecord, clone: BotRecord): Promise<void> {
+    const model = this.defaultModel?.resolve()
+    if (model === undefined) return
+    try {
+      const rows = await this.snapshotBotMemory(source)
+      if (rows === undefined || rows.length === 0) return
+      await consolidateMemory({
+        ctx: this.ctx,
+        botName: clone.name,
+        workspaceDir: clone.workspaceDir,
+        rows,
+        provider: routeIdFor(model.id),
+        model: model.modelName,
+      })
+    } catch (error: unknown) {
+      this.ctx.logger.warn('chat-bots: clone distillation failed for "%s": %o', clone.id, error)
+    }
   }
 
   /** Patch a bot; persona edits apply live, model/capability edits rebuild the agent. */
@@ -1577,6 +1737,18 @@ export class ChatBots extends Service {
             // 通知前端清除该会话的全部本地状态（含流式残留）
             this.broadcast('message.cleared', { conversationId: `private:${botId}` })
             return json(res, 200, { cleared: true })
+          }
+
+          // 克隆好友：复制配置与记忆，并对源会话做总结写入克隆体记忆。
+          // 蒸馏是一次 LLM 调用，因此这里 await（而不是像 clear 那样
+          // fire-and-forget）——调用方要拿到"已经带上总结"的克隆体。
+          if (action === '/clone') {
+            if (req.method !== 'POST') return json(res, 405, { error: 'method not allowed' })
+            // 克隆词由前端按当前语言传入（宿主没有 i18n）；缺省时后端用兜底词
+            const body = await readBody(req)
+            const suffix = typeof body.suffix === 'string' ? body.suffix : undefined
+            const bot = await this.clone(botId, suffix)
+            return json(res, 200, enrich(bot))
           }
 
           // 长期记忆：跨会话持久，清空对话不会丢失

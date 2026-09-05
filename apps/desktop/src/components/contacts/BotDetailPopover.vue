@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from "vue";
-import { MessageCircle, Pencil } from "lucide-vue-next";
+import { Copy, MessageCircle, Pencil } from "lucide-vue-next";
 import Avatar from "../common/Avatar.vue";
 import BotAgentBadge from "./BotAgentBadge.vue";
 import { useBotsStore } from "../../stores/bots";
@@ -78,6 +78,25 @@ function editBot(b: Bot) {
   app.openBotEditor(b);
   hideBotDetail();
 }
+
+/** 克隆好友（提示由 bots.clone() 统一发出）；服务端要跑一次会话总结，故禁用防重复 */
+const cloning = ref(false);
+async function cloneBot(b: Bot) {
+  if (cloning.value) return;
+  cloning.value = true;
+  try {
+    const created = await bots.clone(b.id);
+    // 与新建好友一致：建会话并跳转，克隆体立即可聊
+    const conv = await conversations.createPrivate(created.id);
+    hideBotDetail();
+    app.navigate("chat");
+    await conversations.select(conv.id);
+  } catch (e) {
+    app.toast(e instanceof Error ? e.message : String(e));
+  } finally {
+    cloning.value = false;
+  }
+}
 </script>
 
 <template>
@@ -112,18 +131,6 @@ function editBot(b: Bot) {
           </div>
         </section>
 
-        <!-- 技能 -->
-        <section v-if="bot.skills.length" class="mt-3.5">
-          <h3 class="mb-1.5 text-[10px] font-medium uppercase tracking-wider text-lo">{{ t("contacts.skills") }}</h3>
-          <div class="flex flex-wrap gap-1.5">
-            <span
-              v-for="skill in bot.skills"
-              :key="skill"
-              class="rounded-lg border border-line bg-ink-3/80 px-2.5 py-1 text-[11px] text-mid"
-            >{{ skill }}</span>
-          </div>
-        </section>
-
         <!-- 创建时间 -->
         <section class="mt-3.5">
           <h3 class="mb-1 text-[10px] font-medium uppercase tracking-wider text-lo">{{ t("contacts.createdAt") }}</h3>
@@ -137,6 +144,14 @@ function editBot(b: Bot) {
             @click="chatWithBot(bot)"
           >
             <MessageCircle :size="14" /> {{ t("contacts.sendMessage") }}
+          </button>
+          <button
+            class="flex items-center justify-center rounded-xl border border-line-strong/50 px-3 py-2 text-mid transition-colors hover:border-accent/40 hover:bg-ink-3 hover:text-hi disabled:cursor-not-allowed disabled:opacity-50"
+            :title="t('contacts.menu.cloneBot')"
+            :disabled="cloning"
+            @click="cloneBot(bot)"
+          >
+            <Copy :size="14" />
           </button>
           <button
             class="flex items-center justify-center rounded-xl border border-line-strong/50 px-3 py-2 text-mid transition-colors hover:border-accent/40 hover:bg-ink-3 hover:text-hi"

@@ -49,7 +49,6 @@ const form = reactive({
   name: "",
   avatar: null as string | null,
   persona: "",
-  skills: "",
   model_id: "" as string,
   // 群聊触发：默认不主动开口，勾选后按空闲窗口发言
   auto_speak: false,
@@ -81,7 +80,6 @@ watch(
       form.name = target.name;
       form.avatar = target.avatar ?? null;
       form.persona = target.persona;
-      form.skills = target.skills.join(", ");
       form.model_id = target.model_id ?? "";
       form.auto_speak = target.trigger_config.auto_speak === true;
       form.idle_trigger_minutes = target.trigger_config.idle_trigger_minutes ?? randomIdleMinutes();
@@ -97,7 +95,6 @@ watch(
       // 弹窗打开时随机生成 ID，作为默认头像
       form.avatar = dicebearUrl("bottts-neutral", randomSeed());
       form.persona = "";
-      form.skills = "";
       form.model_id = "";
       form.auto_speak = false;
       form.idle_trigger_minutes = randomIdleMinutes();
@@ -252,7 +249,6 @@ async function save() {
     name,
     avatar: form.avatar,
     persona: form.persona.trim(),
-    skills: form.skills.split(/[,，]/).map((s) => s.trim()).filter(Boolean),
     model_id: model.id,
     // 后端 provider 字段实际存的是模型路由 id（按路由解析真实供应商），
     // 与 ModelProvider 的字面量联合不对应，按后端契约断言。
@@ -374,11 +370,6 @@ async function save() {
         </template>
       </div>
 
-      <div>
-        <label class="mb-1.5 block text-xs text-mid">{{ t("bot.skills") }}</label>
-        <input v-model="form.skills" type="text" :placeholder="t('bot.skillsPlaceholder')"
-          class="w-full rounded-lg border border-line bg-ink-2/70 px-3 py-2 text-[13px] text-hi outline-none transition-all placeholder:text-lo focus:border-accent/45 focus:shadow-[0_0_0_3px_var(--color-accent-soft)]" />
-      </div>
       <div>
         <label class="mb-1.5 block text-xs text-mid">{{ t("bot.model") }}</label>
         <div class="flex gap-2">

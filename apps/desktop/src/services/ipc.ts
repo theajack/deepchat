@@ -146,7 +146,6 @@ function toFrontBot(bot: DshBot): FrontBot {
     name: bot.name,
     avatar: toFrontAvatarUrl(bot.avatar),
     persona: bot.persona,
-    skills: [],
     trigger_config: toFrontTrigger(bot.trigger),
     model_provider: bot.provider,
     model_name: bot.model,
@@ -389,6 +388,15 @@ export class DshTransport implements IpcTransport {
     if (method === 'bot.delete') {
       await dshSend('DELETE', `/chatapi/bots/${String(params.id)}`)
       return undefined as T
+    }
+    if (method === 'bot.clone') {
+      // 服务端会同步完成"会话总结 → 写入克隆体记忆"，因此这一步较慢，
+      // 前端需要给出等待反馈（见 ContactsView 的克隆按钮）。
+      const bot = await dshSend<DshBot>('POST', `/chatapi/bots/${String(params.id)}/clone`, {
+        // 克隆词由前端按当前语言提供；后端据此生成「名字-克隆体N」
+        ...(typeof params.suffix === 'string' ? { suffix: params.suffix } : {}),
+      })
+      return toFrontBot(bot) as T
     }
 
     // ── conversation（私聊 = bot 会话；群聊 = /chatapi/groups）──

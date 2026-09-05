@@ -98,6 +98,13 @@ export class ChatApi {
   deleteBot(id: string): Promise<void> {
     return this.t.request('bot.delete', { id })
   }
+  /**
+   * 克隆好友：复制全部配置与长期记忆（头像也一并复制）。
+   * 历史会话不复制，但会被立刻总结后写入克隆体的记忆文件。
+   */
+  cloneBot(id: string, suffix?: string): Promise<Bot> {
+    return this.t.request('bot.clone', { id, suffix })
+  }
 
   listModels(): Promise<ModelConfig[]> {
     return this.t.request('model.list')

@@ -45,6 +45,8 @@ function onContextMenu(e: MouseEvent, conv: Conversation) {
       {
         items: [
           { key: "rename", label: isGroup ? t("conv.menu.renameGroup") : t("conv.menu.renameBot") },
+          // 仅私聊可克隆：群聊没有"复制出一个新群"的语义
+          ...(isGroup ? [] : [{ key: "clone", label: t("conv.menu.cloneBot") }]),
         ],
       },
       {
@@ -74,7 +76,7 @@ async function onConfirm() {
   if (state) await state.action();
 }
 
-function onMenuSelect(key: string) {
+async function onMenuSelect(key: string) {
   const conv = menuConv.value;
   if (!conv) return;
   switch (key) {
@@ -90,6 +92,17 @@ function onMenuSelect(key: string) {
         if (bot) app.openBotEditor(bot);
       }
       break;
+    case "clone": {
+      // 私聊会话 id 形如 private:{botId}；克隆提示由 bots.clone() 发出
+      const botId = conv.id.startsWith("private:") ? conv.id.slice("private:".length) : "";
+      if (botId !== "") {
+        const created = await bots.clone(botId);
+        // 与新建好友一致：建会话并跳到克隆体的对话
+        const newConv = await conversations.createPrivate(created.id);
+        await conversations.select(newConv.id);
+      }
+      break;
+    }
     case "deleteSession":
       requestConfirm({
         title: t("conv.deleteSession.title"),
@@ -106,7 +119,7 @@ function onMenuSelect(key: string) {
         requestConfirm({
           title: t("contacts.deleteGroup.title"),
           message: t("contacts.deleteGroup.message", { name: conv.name }),
-          confirmText: t("common.delete"),
+          confirmText: t("common.disband"),
           action: async () => {
             await conversations.remove(conv.id);
             app.toast(t("contacts.deletedGroup"));
@@ -205,20 +218,32 @@ watch(
       <div
         v-for="conv in visible"
         :key="conv.id"
-        class="group relative mx-2 mb-0.5 flex cursor-pointer items-center gap-2.5 rounded-lg px-2.5 py-2.5 transition-all duration-150 hover:bg-ink-3/70"
+        class="group relative mx-2 mb-0.5 flex cursor-pointer items-center gap-2.5 rounded-lg px-2.5 py-2.5 transition-all duration-150"
         :class="{
+          // 激活态最强：实色底 + 发光光条
           '!bg-ink-4': conv.id === conversations.activeId,
-          'bg-ink-3/40': conversations.isPinnedTop(conv.id) && conv.id !== conversations.activeId,
+          // 置顶（非激活）：accent 淡底 + 左侧竖条，与激活态明确区分。
+          // 注意 hover 必须比常态更亮；之前的 bg-ink-3/40 会被
+          // hover:bg-ink-3/70 覆盖，导致置顶项 hover 后反而变淡。
+          'bg-accent-soft hover:bg-accent/[0.16]':
+            conversations.isPinnedTop(conv.id) && conv.id !== conversations.activeId,
+          'hover:bg-ink-3/70':
+            conv.id !== conversations.activeId && !conversations.isPinnedTop(conv.id),
         }"
         @click="conversations.select(conv.id)"
         @contextmenu="onContextMenu($event, conv)"
         @mouseenter="onConvEnter(conv, $event)"
         @mouseleave="onConvLeave"
       >
-        <!-- 激活左侧光条 -->
+        <!-- 激活左侧光条（粗 + 发光） -->
         <span
           v-if="conv.id === conversations.activeId"
           class="absolute -left-2 h-5 w-[3px] rounded-r-full bg-accent shadow-[0_0_8px_var(--color-accent)]"
+        />
+        <!-- 置顶左侧竖条（细、不发光，弱于激活态但一眼可辨） -->
+        <span
+          v-else-if="conversations.isPinnedTop(conv.id)"
+          class="absolute -left-2 h-5 w-[2px] rounded-r-full bg-accent/70"
         />
         <GroupAvatar v-if="conv.type === 'group'" :members="(conversations.membersMap[conv.id] ?? []).map((b) => ({ name: b.name, avatar: b.avatar, deleted: b.deleted }))" :size="40" />
         <!-- 私聊：好友已删除 → 头像灰滤镜 + 橙色"不存在"角标，hover 提示「好友已删除」 -->
@@ -236,8 +261,16 @@ watch(
         <div class="min-w-0 flex-1">
           <div class="flex items-center justify-between">
             <span class="flex min-w-0 items-center gap-1.5 text-[13px] font-medium text-hi">
-              <Pin v-if="conversations.isPinnedTop(conv.id)" :size="11" :stroke-width="2.5" class="shrink-0 text-accent" />
-              <span class="truncate">{{ conv.name }}</span>
+              <Pin
+                v-if="conversations.isPinnedTop(conv.id)"
+                :size="12"
+                :stroke-width="2.5"
+                class="shrink-0 fill-accent/25 text-accent"
+              />
+              <span
+                class="truncate"
+                :class="{ 'text-accent': conversations.isPinnedTop(conv.id) && conv.id !== conversations.activeId }"
+              >{{ conv.name }}</span>
               <BotAgentBadge v-if="conv.type === 'private' && botOf(conv)" :agent-enabled="botOf(conv)!.agent_enabled" :size="13" />
               <span v-if="conv.type === 'group'" class="flex shrink-0 items-center gap-0.5 text-[10px] font-normal text-accent">
                 <Users :size="11" :stroke-width="2" />

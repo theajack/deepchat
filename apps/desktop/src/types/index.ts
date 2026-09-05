@@ -14,7 +14,6 @@ export interface Bot {
   name: string
   avatar: string | null
   persona: string
-  skills: string[]
   trigger_config: TriggerConfig
   model_provider: ModelProvider
   model_name: string
@@ -38,7 +37,6 @@ export interface BotInput {
   name: string
   avatar?: string | null
   persona?: string
-  skills?: string[]
   model_provider?: ModelProvider
   model_name?: string
   model_id?: string | null
