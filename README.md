@@ -1,175 +1,214 @@
-# Chat Agent
+# DeepChat
 
-基于 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（`dsh`）构建的**本地 AI 好友聊天桌面工具**。
+A **local AI-companion chat desktop app** built on top of [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (`dsh`).
 
-创建多位具备人设、技能与工具权限的 AI 好友，与它们一对一私聊，或拉一个群让多位 AI 按「规则 + 概率」自主发言、互相接话。
+Create multiple AI companions, each with its own persona, skills and tool permissions. Chat with them one-on-one, or drop several of them into a group where they speak up on their own — following rules plus a bit of probability — and riff off each other.
 
-**全部数据留在本机**，不依赖任何服务端。
+**All data stays on your machine.** No server required.
 
 ---
 
-## 这是什么
+## What this is
 
-本项目把 AI 好友聊天的业务能力，以**插件**形式构建在 DeepSeek Harness 之上：
+The chat product is built as **plugins** on top of DeepSeek Harness:
 
-- **运行内核全部复用 dsh** —— agent loop、工具系统、LLM 适配、会话事件日志、HTTP/WS 传输、Cordis 插件树
-- **聊天业务自建** —— AI 好友、群聊触发引擎、长期记忆、桌面 UI
-- **UI 沿用原 chat-agent** —— Tauri 2 + Vue 3，通信层从 stdin/stdout 换成 HTTP + SSE
+- **Runtime comes entirely from dsh** — agent loop, tool system, LLM adapters, session event log, HTTP/WS transport, Cordis plugin tree
+- **Chat business logic is ours** — AI companions, the group trigger engine, long-term memory, desktop UI
+- **UI carried over from the original chat-agent** — Tauri 2 + Vue 3, with the transport switched from stdin/stdout to HTTP + SSE
 
-> 上游框架的文档完整保留在 [`docs/`](docs/)（219 篇）与 [`README.zh.md`](README.zh.md) 中。本文件只描述本项目自身。
+> The upstream framework docs are kept in full under [`docs/`](docs/) (219 pages). This file describes this project itself; the Chinese version lives in [`README.zh.md`](README.zh.md).
 
-## 核心特性
+## Getting started
 
-**AI 好友**
-- 人设（persona）注入、头像、简介、独立工作目录
-- 按好友粒度勾选可用工具、技能、MCP 服务
-- Agent 能力开关：关闭后即纯聊天，不向模型暴露任何工具
-- **长期记忆**：每次清空对话时，自动把这段关系沉淀成 `MEMORY.md`；跨会话持久，清空聊天记录不会丢失，可在编辑弹窗中查看与手动修改
-
-**群聊**
-- 多位 AI 同群，按触发规则自主发言：`@名字` 必答 → 冷却窗口 → 关键词命中 → 基础概率
-- 每个（群, 好友）组合持有独立会话记忆，群聊经历与私聊互不串扰
-- AI 之间可连锁接话（最多 3 轮）
-
-**模型**
-- 支持 OpenAI / Anthropic 及任意 OpenAI 兼容端点
-- 模型配置与 API Key 存于本地凭据文件
-- 未配置任何 Key 时，联网搜索自动降级到免密钥的兜底通道
-
-**桌面端**
-- 深色主题，流式打字机输出
-- 工具调用卡片：实时展开参数与执行结果，长耗时工具可见进度而非干等
-- 会话列表、好友列表、历史消息均采用分页 / 增量渲染，长列表不卡
-- 内置调试面板：LLM 调用瀑布流、运行日志
-
-## 架构
-
-```
-┌─────────────────────────────────────────────┐
-│  Tauri 2 桌面端 (apps/desktop)              │
-│  Vue 3 + Pinia + Tailwind 4                 │
-└──────────────────┬──────────────────────────┘
-                   │ HTTP / SSE  127.0.0.1:3180
-┌──────────────────▼──────────────────────────┐
-│  chat 插件族 (packages/chat/)               │
-│  chat-bots   好友注册表 + 私聊 + 模型/技能  │
-│  chat-group  群聊编排 + 触发引擎            │
-│  chat-agent  bundle 组合层 (cordis.patch)   │
-└──────────────────┬──────────────────────────┘
-                   │
-┌──────────────────▼──────────────────────────┐
-│  DeepSeek Harness 内核                      │
-│  agent-loop · tools · llm · session · http  │
-└─────────────────────────────────────────────┘
-```
-
-一次对话的完整链路：
-
-```
-用户发消息
-  → POST /chatapi/bots/:id/send    （群聊走 /chatapi/groups/:id/send）
-  → ensureAgent → agent.followup()
-  → dsh agent-loop 执行，turn 内可多轮工具调用
-  → 会话事件流经 bridge.ts 翻译成前端事件
-  → SSE /chatapi/events 推送
-  → 前端渲染：message.stream → 打字机 → message.created
-```
-
-## 目录结构
-
-```
-deepseek-harness/
-├── apps/
-│   ├── desktop/            # Tauri 2 桌面应用（本项目 UI）
-│   ├── cli/                # dsh CLI 入口
-│   └── web/                # dsh 原生 Web UI（调试用）
-├── packages/
-│   ├── chat/               # 本项目业务插件
-│   │   ├── chat-bots/      #   好友 + 私聊 + 模型/技能/工具端点
-│   │   ├── chat-group/     #   群聊编排 + 触发引擎
-│   │   └── chat-agent/     #   bundle 组合层
-│   └── ...                 # dsh 原有包
-├── .dsh-home/              # 开发态 DSH_HOME（gitignore）
-├── chat-agent-context/     # 迁移与设计文档
-└── docs/                   # 上游 dsh 文档
-```
-
-## 快速开始
-
-**环境要求**
+**Requirements**
 
 - [Node.js](https://nodejs.org/) ≥ 20
 - [pnpm](https://pnpm.io/) ≥ 9
-- [Rust](https://www.rust-lang.org/) 工具链（构建桌面端）
+- [Rust](https://www.rust-lang.org/) toolchain (to build the Tauri desktop app)
 
-**运行桌面应用**
+**1. Install dependencies and build the dsh core**
+
+The desktop app launches the backend host via `node apps/cli/lib/bin.js --profile chat-agent`, so the core **must be built first** — otherwise startup fails with "unable to locate dsh".
 
 ```bash
 cd deepseek-harness
 pnpm install --ignore-scripts
-pnpm run build          # 构建 host + client
-
-cd apps/desktop
-pnpm tauri dev          # 首次编译 Rust 约 1-2 分钟
+pnpm run build          # builds host + client, emits apps/cli/lib/
 ```
 
-**仅调试后端**
+**2. Start the desktop app**
 
 ```bash
-DSH_HOME=$PWD/.dsh-home node apps/cli/lib/bin.js --profile chat-agent
-curl http://127.0.0.1:3180/chatapi/bots
+cd apps/desktop
+pnpm tauri dev          # first Rust compile takes roughly 1–3 minutes
 ```
 
-## 数据存放
+`pnpm tauri dev` does two things:
 
-所有数据位于 `DSH_HOME`（开发模式为 `repo/.dsh-home`），在设置页「数据目录」中可直接打开。
+1. Runs `beforeDevCommand` (`pnpm dev`), starting the Vite dev server at `http://localhost:1420`
+2. Spawns the dsh host from the Rust side (`spawn_dsh`), polls `127.0.0.1:3180` until it is ready, then tells the frontend it can start making requests
 
-| 路径 | 内容 |
+**3. Other ways to run it**
+
+```bash
+# Frontend only (start the backend in another terminal) — handy for UI work
+cd apps/desktop && pnpm dev
+DSH_HOME=$PWD/.dsh-home node apps/cli/lib/bin.js --profile chat-agent
+
+# Backend only, no desktop window
+DSH_HOME=$PWD/.dsh-home node apps/cli/lib/bin.js --profile chat-agent
+curl http://127.0.0.1:3180/chatapi/bots
+
+# Point the app at a custom host command (overrides the in-repo CLI)
+DEEPCHAT_DSH_CMD="node /abs/path/to/bin.js" pnpm tauri dev
+```
+
+**Packaging the desktop app**
+
+```bash
+cd apps/desktop
+pnpm tauri build        # beforeBuildCommand runs `pnpm build` first to emit dist
+```
+
+> After changing `packages/chat/*`, rebuild the plugin packages (`tsc -b` + `tsdown`) **and restart the host process**: Vite hot-reloads the frontend, but already-loaded Node modules are never swapped in place.
+
+## Features
+
+**AI companions**
+- Persona injection, avatar, tagline, dedicated workspace directory
+- Per-companion allow-lists for **tools / skills / MCP servers** (dedicated pickers — no more typing names by hand)
+- Agent capability switch: turn it off and the companion is pure chat, with no tools exposed to the model
+- **AI-assisted generation**: describe it in one line and the persona, self-introduction or group description streams into the field over SSE
+- **Long-term memory**: clearing a conversation distills the relationship into `MEMORY.md`. It survives across sessions and clearing the chat log, and you can read or hand-edit it in the edit dialog
+- **Clone a companion**: one click produces a twin with identical configuration but a fresh identity — persona, model, tools, skills, avatar file and long-term memory are copied, and the source conversation is immediately distilled into the clone's memory. Names increment automatically (`Xiaoyi` → `Xiaoyi-Clone` → `Xiaoyi-Clone2`)
+
+**Groups**
+- Several companions in one room, speaking on their own: `@name` always answers → cooldown window → keyword hit → base probability
+- **Proactive speaking**: opt-in; once the room has been idle for N minutes, a companion starts a new thread (randomized between 5 and 10 minutes so members do not speak in unison)
+- Each (group, companion) pair keeps its own session memory, so group history and private chats never bleed into each other
+- **Shared group workspace**: the group and every member have their own directory, injected into context so each companion picks where to read and write
+- Companions can chain off each other (up to 3 rounds)
+
+**Conversations & interface**
+- Dark theme, streaming typewriter output; Chinese and English (follows the system, switchable by hand)
+- Pin conversations, clear history, delete sessions; right-click menu on the list (companions: message / clone / delete; groups: disband, with a confirmation step)
+- **Image attachments persist**: sent images are written to `$HOME/chat-agent-images/<conversation id>/`; older images are migrated automatically and keep rendering after a restart
+
+**Models**
+- OpenAI / Anthropic plus any OpenAI-compatible endpoint
+- Model configuration and API keys live in a local credentials file
+- With no key configured, web search falls back to a keyless channel
+
+**Desktop app**
+- Tool-call cards: arguments and results expand live, so a slow tool shows progress instead of a blank wait
+- Conversation list, companion list and message history are all paginated / incrementally rendered — long lists stay smooth
+- Built-in debug panel: LLM call waterfall, runtime logs
+
+## Architecture
+
+```
+┌─────────────────────────────────────────────┐
+│  Tauri 2 desktop app (apps/desktop)         │
+│  Vue 3 + Pinia + Tailwind 4                 │
+└──────────────────┬──────────────────────────┘
+                   │ HTTP / SSE  127.0.0.1:3180
+┌──────────────────▼──────────────────────────┐
+│  chat plugin family (packages/chat/)        │
+│  chat-bots   registry + DMs + models/skills │
+│  chat-group  orchestration + trigger engine │
+│  chat-agent  bundle composition (cordis)    │
+└──────────────────┬──────────────────────────┘
+                   │
+┌──────────────────▼──────────────────────────┐
+│  DeepSeek Harness core                      │
+│  agent-loop · tools · llm · session · http  │
+└─────────────────────────────────────────────┘
+```
+
+The full path of one message:
+
+```
+user sends a message
+  → POST /chatapi/bots/:id/send    (groups: /chatapi/groups/:id/send)
+  → ensureAgent → agent.followup()
+  → dsh agent-loop runs, multiple tool calls per turn
+  → session events are translated to frontend events by bridge.ts
+  → pushed over SSE /chatapi/events
+  → rendered: message.stream → typewriter → message.created
+```
+
+## Layout
+
+```
+deepseek-harness/
+├── apps/
+│   ├── desktop/            # Tauri 2 desktop app (this project's UI)
+│   ├── cli/                # dsh CLI entrypoint
+│   └── web/                # dsh's own web UI (debugging)
+├── packages/
+│   ├── chat/               # this project's plugins
+│   │   ├── chat-bots/      #   companions + DMs + model/skill/tool endpoints
+│   │   ├── chat-group/     #   group orchestration + trigger engine
+│   │   └── chat-agent/     #   bundle composition layer
+│   └── ...                 # the rest of dsh
+├── .dsh-home/              # dev-mode DSH_HOME (gitignored)
+├── chat-agent-context/     # migration and design docs
+└── docs/                   # upstream dsh docs
+```
+
+## Where data lives
+
+Everything sits under `DSH_HOME` (`repo/.dsh-home` in dev mode); the Settings page can open it directly.
+
+| Path | Contents |
 |---|---|
-| `storages/` | 结构化数据（好友、群聊、模型配置），JSON 持久化 |
-| `workspace/agents/` | 每个好友一个目录：工作文件 + `memory/MEMORY.md` |
-| `workspace/groups/` | 群聊共享工作文件 |
-| `sessions/` | 会话事件日志（zstd 压缩 JSONL，仅追加） |
-| `skills/` | 已安装的技能包 |
-| `logs/` | 运行日志（`debug.log`） |
+| `storages/` | Structured data (companions, groups, model config), persisted as JSON |
+| `workspace/agents/` | One directory per companion: work files + `memory/MEMORY.md` (long-term memory) |
+| `workspace/groups/` | Group-shared work files |
+| `sessions/` | Session event logs (zstd-compressed JSONL, append-only) |
+| `skills/` | Installed skill packages |
+| `logs/` | Runtime logs (`debug.log`) |
+| `$HOME/chat-agent-images/` | Conversation image attachments (one directory per conversation, loadable by the webview) |
 
-会话是**仅追加的事件日志**，界面上的消息是按 turn/prompt 聚合投影出来的，不是数据库行。
+Sessions are an **append-only event log**. What you see as messages is a projection aggregated by turn/prompt — not database rows.
 
-## 关键约定
+## Key conventions
 
-| 项 | 约定 |
+| Item | Convention |
 |---|---|
-| 服务端口 | `127.0.0.1:3180` |
-| 会话 id | 私聊 `private:{botId}`，群聊 `{groupId}` |
-| 消息 id | 用户消息 `u-{seq}`，AI 消息 `m-p{promptSeq}` |
-| 模型路由 id | `chat-{modelId}` |
-| 凭据 ref | `CHAT_AGENT_MODEL_{ID大写}` |
-| 好友 id | `bot-{uuid}` |
+| Ports | backend `127.0.0.1:3180`, frontend dev server `localhost:1420` |
+| Session id | private `private:{botId}`, group `{groupId}` |
+| Message id | user `u-{seq}`, assistant `m-p{promptSeq}` |
+| Model route id | `chat-{modelId}` |
+| Credential ref | `CHAT_AGENT_MODEL_{ID uppercased}` |
+| Companion id | `bot-{uuid}` |
+| Clone naming | `{original}-{clone word}{index}`; the first clone carries no number |
 
-## 开发说明
+## Development notes
 
-- 插件遵循 Cordis 规范：`export const name` / `inject` / `Config` / `apply(ctx, config)`
-- `settings` 与 `credentials` **不可写入模块级 `inject`**（会导致启动死锁），须用 `ctx.inject()` 动态注入
-- 同一插件内多次 `storageDomain.open` 会抛 `json backend is closed`，所有表须共享一个 domain 句柄
-- 修改 `packages/chat/*` 后需重新 `tsdown` 打包，**并重启宿主进程**才会生效（profile 是软链，但已加载的模块不会热更新）
-- 消息历史分页用游标（`?before=<seq>`）而非 offset，避免追加新消息时错位
+- Plugins follow the Cordis contract: `export const name` / `inject` / `Config` / `apply(ctx, config)`
+- `settings` and `credentials` must **not** go into the module-level `inject` (it deadlocks startup); inject them dynamically with `ctx.inject()`
+- Calling `storageDomain.open` twice inside one plugin throws `json backend is closed` — share a single domain handle across all tables
+- After changing `packages/chat/*`, re-run `tsdown` **and restart the host process**: the profile is a symlink, but already-loaded modules are not hot-replaced
+- Message history paginates by cursor (`?before=<seq>`), not offset, so appending new messages never shifts the page
+- The host has no i18n service, so localized strings needed by the backend (e.g. the clone suffix word) are passed in by the frontend
 
-## 文档索引
+## Documentation index
 
-迁移背景、插件职责、事件桥接、存储设计等细节见 [`chat-agent-context/`](chat-agent-context/)：
+Migration background, plugin responsibilities, event bridging and storage design are documented under [`chat-agent-context/`](chat-agent-context/):
 
-| 文件 | 内容 |
+| File | Contents |
 |---|---|
-| `00-overview.md` | 项目总览与迁移背景 |
-| `01-backend-plugins.md` | 三个 chat 插件的职责与端点 |
-| `02-event-bridge.md` | 会话事件到前端事件的翻译 |
-| `03-workspace-sandbox.md` | 工作目录与沙箱 |
-| `04-models-skills-tools.md` | 模型、技能、工具机制 |
-| `05-frontend.md` | 前端架构 |
-| `06-storage.md` | 数据存储布局 |
-| `07-pitfalls.md` | 已踩过的坑 |
-| `08-milestones.md` | 里程碑与待办 |
+| `00-overview.md` | Project overview and migration background |
+| `01-backend-plugins.md` | Responsibilities and endpoints of the three chat plugins |
+| `02-event-bridge.md` | Translating session events into frontend events |
+| `03-workspace-sandbox.md` | Workspaces and sandboxing |
+| `04-models-skills-tools.md` | Model, skill and tool mechanics |
+| `05-frontend.md` | Frontend architecture |
+| `06-storage.md` | Data storage layout |
+| `07-pitfalls.md` | Pitfalls already hit |
+| `08-milestones.md` | Milestones and backlog |
 
-## 许可
+## License
 
-本项目沿用上游 DeepSeek Harness 的许可，详见 [`LICENSE`](LICENSE)。
+This project follows the upstream DeepSeek Harness license; see [`LICENSE`](LICENSE).
