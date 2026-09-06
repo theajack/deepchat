@@ -9,10 +9,16 @@ function systemPrefersDark(): boolean {
   return typeof window !== 'undefined' && window.matchMedia?.('(prefers-color-scheme: dark)').matches
 }
 
+/**
+ * 默认跟随系统：未做过选择的新用户交给 OS 配色决定。
+ *
+ * 已选过的用户 localStorage 里存着 light/dark/system，走下面的原样返回分支，
+ * 不受这个默认值影响。
+ */
 function load(): ThemeMode {
-  if (typeof localStorage === 'undefined') return 'dark'
+  if (typeof localStorage === 'undefined') return 'system'
   const v = localStorage.getItem(STORAGE_KEY) as ThemeMode | null
-  return v === 'light' || v === 'dark' || v === 'system' ? v : 'dark'
+  return v === 'light' || v === 'dark' || v === 'system' ? v : 'system'
 }
 
 export const useThemeStore = defineStore('theme', () => {

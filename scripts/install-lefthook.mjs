@@ -13,8 +13,26 @@ import {
   writeFileSync,
 } from 'node:fs'
 import { spawnSync } from 'node:child_process'
+import { createRequire } from 'node:module'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
-import lefthookPackage from 'lefthook/package.json' with { type: 'json' }
+
+const require = createRequire(import.meta.url)
+
+/**
+ * Read lefthook's manifest, or `undefined` when the package is absent.
+ *
+ * `lefthook` is a devDependency, so a production install does not provide it.
+ * Resolving it lazily keeps that case a silent skip; a static import would
+ * throw while this module is still being linked, before the guards in main()
+ * can decide to do nothing.
+ */
+function readLefthookPackage() {
+  try {
+    return JSON.parse(readFileSync(require.resolve('lefthook/package.json'), 'utf8'))
+  } catch {
+    return undefined
+  }
+}
 
 const MINIMUM_GIT = [2, 26, 0]
 const HOOKS_DIRECTORY = 'dsh-hooks'
@@ -690,7 +708,8 @@ function probePairingMergeDriver(root) {
 
 async function main() {
   if (process.env.CI === 'true' || process.env.GITHUB_ACTIONS === 'true') return
-  if (typeof lefthookPackage.bin?.lefthook !== 'string') return
+  const lefthookPackage = readLefthookPackage()
+  if (typeof lefthookPackage?.bin?.lefthook !== 'string') return
   const probe = spawnSync('git', ['rev-parse', '--show-toplevel'], { encoding: 'utf8' })
   if (probe.status !== 0) return
   const root = stripGitLineTerminator(probe.stdout)

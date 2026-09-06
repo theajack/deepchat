@@ -6,6 +6,12 @@
 
 **全部数据留在本机**，不依赖任何服务端。
 
+<p align="center">
+    <a href='https://www.github.com/theajack/deepchat'>
+        <img src='./website/deepchat_icon.png' width='240px'/>
+    </a>
+</p>
+
 ---
 
 ## 这是什么
@@ -66,9 +72,18 @@ DEEPCHAT_DSH_CMD="node /abs/path/to/bin.js" pnpm tauri dev
 **打包桌面应用**
 
 ```bash
-cd apps/desktop
-pnpm tauri build        # beforeBuildCommand 会先跑 pnpm build 产出 dist
+bash scripts/build-desktop.sh
 ```
+
+产物：`apps/desktop/src-tauri/target/release/bundle/dmg/DeepChat_0.1.0_aarch64.dmg`（约 130MB，安装后 512MB）。
+
+打包过程中 `scripts/build-desktop-runtime.sh` 会把 dsh 运行时塞进 app：下载一份 Node 二进制，再用 `pnpm deploy` 导出 dsh CLI 与 chat 插件的生产依赖闭包，一并放进 `Contents/Resources`。**拿到 dmg 的人不需要装 Node，也不需要克隆仓库**，双击即用。
+
+运行期数据（好友、群聊、会话、记忆、图片）落在 `~/Library/Application Support/com.deepchat.desktop/dsh-home`，与开发用的 `repo/.dsh-home` 是两份，互不影响。
+
+> 为什么不是直接 `pnpm tauri build`：pnpm 11 会在运行命令前校验依赖，必要时自己执行 `pnpm install --production`，把 devDependencies 剪掉，打包还没开始就断在这里。脚本里已关掉这个校验（`pnpm_config_verify_deps_before_run=false`，pnpm 只认环境变量，`.npmrc` 无效）。
+>
+> 打包未使用开发者证书签名，别人首次打开需在「系统设置 → 隐私与安全性」点「仍要打开」，或执行 `xattr -rd com.apple.quarantine /Applications/DeepChat.app`。
 
 > 修改 `packages/chat/*` 后需重新构建插件包（`tsc -b` + `tsdown`）**并重启宿主进程**才会生效：Vite 前端可热更新，但已加载的 node 模块不会热替换。
 

@@ -1,5 +1,5 @@
 use std::net::TcpStream;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -70,23 +70,120 @@ fn resolve_repo_root() -> Option<PathBuf> {
     }
 }
 
-/// 解析 dsh 启动方式：
-/// 1. DEEPCHAT_DSH_CMD 环境变量（完整命令，如 "node /path/bin.js"）
-/// 2. 打包后：app bundle 内嵌的 dsh（TODO：随产物分发）
-/// 3. dev 兜底：仓库根目录 node apps/cli/lib/bin.js --profile chat-agent
-fn resolve_dsh_command() -> Option<(String, Vec<String>, PathBuf)> {
-    // 1. 显式环境变量（空格分隔完整命令）
-    if let Ok(cmd) = std::env::var("DEEPCHAT_DSH_CMD") {
-        let mut parts = cmd.split_whitespace().map(String::from);
-        let program = parts.next()?;
-        let args: Vec<String> = parts.chain(["--profile".into(), "chat-agent".into()]).collect();
-        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-        return Some((program, args, cwd));
+/// 打包进 app 的 dsh 运行时目录（Contents/Resources/dsh）。
+///
+/// 布局由 `scripts/build-desktop-runtime.sh` 产出：
+/// ```text
+/// resources/dsh/
+/// ├── node/bin/node            内置 Node，用户机器上无需自己装 Node
+/// └── runtime/                 dsh CLI + chat 插件的生产依赖闭包
+/// ```
+/// dev（未打包）时 `resource_dir()` 不存在，退回仓库内的同名目录，
+/// 这样 `pnpm tauri dev` 与打包产物走的是同一条路径。
+fn resolve_bundled_dsh_dir(app: &AppHandle) -> Option<PathBuf> {
+    if let Ok(dir) = app.path().resource_dir() {
+        // Tauri 把 `bundle.resources` 的条目放在 <resource_dir>/resources 下，
+        // 两种布局都认一遍，避免以后调整 resources 配置就找不到运行时。
+        for candidate in [dir.join("dsh"), dir.join("resources").join("dsh")] {
+            if candidate.join("node").join("bin").join("node").exists() {
+                return Some(candidate);
+            }
+        }
+    }
+    let root = resolve_repo_root()?;
+    let candidate = root.join("apps").join("desktop").join("src-tauri").join("resources").join("dsh");
+    if candidate.join("node").join("bin").join("node").exists() {
+        return Some(candidate);
+    }
+    None
+}
+
+/// 打包运行时的启动三元组（program / args / cwd）。
+fn resolve_bundled_command(app: &AppHandle) -> Option<(String, Vec<String>, PathBuf, PathBuf)> {
+    let dsh_dir = resolve_bundled_dsh_dir(app)?;
+    let node = dsh_dir.join("node").join("bin").join("node");
+    let bin = dsh_dir
+        .join("runtime")
+        .join("node_modules")
+        .join("@deepseek-ai")
+        .join("dsh")
+        .join("lib")
+        .join("bin.js");
+    if !node.exists() || !bin.exists() {
+        return None;
+    }
+    // 运行时目录同时作为 profile 依赖的解析根（见 ensure_dsh_home）
+    let runtime_dir = dsh_dir.join("runtime");
+    Some((
+        node.to_string_lossy().to_string(),
+        vec![bin.to_string_lossy().to_string(), "--profile".into(), "chat-agent".into()],
+        dsh_dir.clone(),
+        runtime_dir,
+    ))
+}
+
+/// 用户数据目录：`~/Library/Application Support/<identifier>/dsh-home`
+///
+/// 打包后 app bundle 是只读的（且会被 Gatekeeper 移形），DSH_HOME 必须落在
+/// 可写目录；dev 模式继续用仓库内的 .dsh-home，保持与既有开发流程一致。
+fn resolve_dsh_home(app: &AppHandle) -> PathBuf {
+    if let Ok(dir) = app.path().app_data_dir() {
+        return dir.join("dsh-home");
+    }
+    std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")).join(".dsh-home")
+}
+
+/// chat-agent profile 的清单：声明 profile 由哪些 bundle 层组成。
+const PROFILE_MANIFEST: &str = r#"{
+  "name": "dsh-profile-chat-agent",
+  "private": true,
+  "dependencies": {},
+  "dsh": {
+    "profile": {
+      "bundles": [
+        "@deepseek-ai/dsh-base",
+        "@deepseek-ai/dsh-chat-agent"
+      ]
+    }
+  }
+}
+"#;
+
+/// 首次运行（或运行时被搬到别处后）准备好 DSH_HOME 与 chat-agent profile。
+///
+/// dsh 解析 profile bundle 时，安装锚点（内置 CLI）只认 `@deepseek-ai/dsh-base`，
+/// chat 插件要靠 profile 目录自己的 node_modules 解析——因此这里把 profile 的
+/// node_modules 软链到打包出来的运行时 node_modules。软链每次启动都重建：
+/// app 被移动到别的目录后旧链接会失效，重建比"一次性创建 + 之后 404"更稳。
+fn ensure_dsh_home(dsh_home: &Path, runtime_dir: &Path) -> std::io::Result<()> {
+    let profile = dsh_home.join("profiles").join("chat-agent");
+    std::fs::create_dir_all(&profile)?;
+
+    let manifest = profile.join("package.json");
+    if !manifest.exists() {
+        std::fs::write(&manifest, PROFILE_MANIFEST)?;
+    }
+    let patch = profile.join("cordis.patch.yml");
+    if !patch.exists() {
+        std::fs::write(&patch, "[]\n")?;
     }
 
-    // 2. 打包后：bundle 内嵌二进制（后续里程碑接入 sidecar）
+    let link = profile.join("node_modules");
+    let target = runtime_dir.join("node_modules");
+    let needs_link = std::fs::read_link(&link).map(|p| p != target).unwrap_or(true);
+    if needs_link {
+        // 已存在则先移除（软链或普通目录都清掉），再重新指向当前运行时
+        match std::fs::symlink_metadata(&link) {
+            Ok(_) => std::fs::remove_file(&link).or_else(|_| std::fs::remove_dir_all(&link))?,
+            Err(_) => {}
+        }
+        std::os::unix::fs::symlink(&target, &link)?;
+    }
+    Ok(())
+}
 
-    // 3. dev 模式：跑仓库内已构建的 dsh CLI
+/// dev 兜底：仓库内已构建的 dsh CLI（`node apps/cli/lib/bin.js`）
+fn resolve_dev_command() -> Option<(String, Vec<String>, PathBuf, Option<PathBuf>)> {
     let root = resolve_repo_root()?;
     let bin = root.join("apps").join("cli").join("lib").join("bin.js");
     if !bin.exists() {
@@ -96,18 +193,59 @@ fn resolve_dsh_command() -> Option<(String, Vec<String>, PathBuf)> {
         "node".to_string(),
         vec![bin.to_string_lossy().to_string(), "--profile".into(), "chat-agent".into()],
         root,
+        None,
     ))
 }
 
+/// 解析 dsh 启动方式：
+/// 1. DEEPCHAT_DSH_CMD 环境变量（完整命令，如 "node /path/bin.js"）
+/// 2. 打包运行时：Contents/Resources 下的内置 node + dsh CLI（用户无需装 Node）
+/// 3. dev 兜底：仓库根目录 node apps/cli/lib/bin.js --profile chat-agent
+///
+/// dev（debug 构建）优先走仓库，数据照旧落在 repo/.dsh-home——运行时
+/// staging 目录在打包前也会存在，若不区分，开发时反而会用上打包产物。
+fn resolve_dsh_command(app: &AppHandle) -> Option<(String, Vec<String>, PathBuf, Option<PathBuf>)> {
+    // 1. 显式环境变量（空格分隔完整命令）
+    if let Ok(cmd) = std::env::var("DEEPCHAT_DSH_CMD") {
+        let mut parts = cmd.split_whitespace().map(String::from);
+        let program = parts.next()?;
+        let args: Vec<String> = parts.chain(["--profile".into(), "chat-agent".into()]).collect();
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        return Some((program, args, cwd, None));
+    }
+
+    if cfg!(debug_assertions) {
+        if let Some(dev) = resolve_dev_command() {
+            return Some(dev);
+        }
+    }
+    // 2. 打包运行时：内置 node + 部署好的依赖闭包
+    if let Some((program, args, cwd, runtime_dir)) = resolve_bundled_command(app) {
+        return Some((program, args, cwd, Some(runtime_dir)));
+    }
+    // 3. dev 兜底
+    resolve_dev_command()
+}
+
 fn spawn_dsh(app: &AppHandle) -> std::io::Result<Arc<Mutex<Child>>> {
-    let (program, args, cwd) = resolve_dsh_command()
+    let (program, args, cwd, runtime_dir) = resolve_dsh_command(app)
         .ok_or_else(|| std::io::Error::other("无法定位 dsh（先在仓库根目录执行 pnpm run build）"))?;
+
+    // DSH_HOME：打包后用应用数据目录（bundle 只读），dev 用仓库内 .dsh-home
+    let dsh_home = match &runtime_dir {
+        Some(_) => resolve_dsh_home(app),
+        None => cwd.join(".dsh-home"),
+    };
+    if let Some(runtime) = &runtime_dir {
+        if let Err(e) = ensure_dsh_home(&dsh_home, runtime) {
+            eprintln!("DeepChat: 准备 DSH_HOME 失败: {e}");
+        }
+    }
 
     let mut child = Command::new(&program)
         .args(&args)
-        .current_dir(&cwd)
-        // 仓库内 DSH_HOME：profile/会话/存储都落在 repo/.dsh-home（已 gitignore）
-        .env("DSH_HOME", cwd.join(".dsh-home"))
+        .current_dir(&dsh_home)
+        .env("DSH_HOME", &dsh_home)
         .stdin(Stdio::null())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())

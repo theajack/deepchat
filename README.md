@@ -6,6 +6,12 @@ Create multiple AI companions, each with its own persona, skills and tool permis
 
 **All data stays on your machine.** No server required.
 
+<p align="center">
+    <a href='https://www.github.com/theajack/deepchat'>
+        <img src='./website/deepchat_icon.png' width='240px'/>
+    </a>
+</p>
+
 ---
 
 ## What this is
@@ -66,9 +72,18 @@ DEEPCHAT_DSH_CMD="node /abs/path/to/bin.js" pnpm tauri dev
 **Packaging the desktop app**
 
 ```bash
-cd apps/desktop
-pnpm tauri build        # beforeBuildCommand runs `pnpm build` first to emit dist
+bash scripts/build-desktop.sh
 ```
+
+Output: `apps/desktop/src-tauri/target/release/bundle/dmg/DeepChat_0.1.0_aarch64.dmg` (~130 MB; ~512 MB once installed).
+
+During the build, `scripts/build-desktop-runtime.sh` stages the dsh runtime into the app: it downloads a Node binary, then uses `pnpm deploy` to export the production dependency closure of the dsh CLI and the chat plugins, and puts both under `Contents/Resources`. **Whoever gets the dmg needs neither Node nor a clone of this repo** — double-click and go.
+
+Runtime data (companions, groups, sessions, memory, images) lands in `~/Library/Application Support/com.deepchat.desktop/dsh-home`, separate from the `repo/.dsh-home` used in development.
+
+> Why not plain `pnpm tauri build`: pnpm 11 verifies dependencies before running a command and, when it decides to, runs `pnpm install --production` itself — pruning devDependencies and breaking the build before it starts. The script disables that check (`pnpm_config_verify_deps_before_run=false`; pnpm only honors the env var here, not `.npmrc`).
+>
+> The bundle is not signed with a developer certificate. On first launch, recipients must click "Open Anyway" under System Settings → Privacy & Security, or run `xattr -rd com.apple.quarantine /Applications/DeepChat.app`.
 
 > After changing `packages/chat/*`, rebuild the plugin packages (`tsc -b` + `tsdown`) **and restart the host process**: Vite hot-reloads the frontend, but already-loaded Node modules are never swapped in place.
 

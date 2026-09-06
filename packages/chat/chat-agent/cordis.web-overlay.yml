@@ -1,0 +1,67 @@
+# The DeepChat web overlay: the chat plugin family on top of the `web` profile.
+#
+# `dsh web` boots the `web` profile (`@deepseek-ai/dsh-base` +
+# `@deepseek-ai/dsh-web-app`), and this file is the `--patch` overlay that adds
+# DeepChat's chat backend to it. It is a reduced form of `cordis.patch.yml`:
+# the bundle patch is a *desktop-surface* layer that `insert`s the storage
+# stack, workspace registry, webserver, and api-gateway — all of which the
+# `web` profile already provides, so re-inserting them aborts the boot with
+# `duplicate loader entry id`. What stays is everything the browser surface
+# genuinely lacks: the chat plugin family, plus the flat rows that retune
+# shared entries for chat.
+#
+# Usage:
+#   pnpm dsh web --patch ./packages/chat/chat-agent/cordis.web-overlay.yml
+#
+# A patch replaces the targeted row's whole `config`, so each row below
+# restates every key it owns.
+
+# Bot personas are per-agent scoped prompt sections (chat-bots); keep the base
+# persona empty so it adds nothing beside the harness identity.
+- id: system-prompt
+  config:
+    persona: ''
+
+# Chat companions must not inherit workspace/project instructions: bot
+# workspaces live inside this repo, so the walk-up would feed the harness
+# repo's AGENTS.md into every first prompt. maxBytes: 0 disables it.
+- id: agent-instructions
+  config:
+    maxBytes: 0
+
+# The model-facing skill catalog and the `skill` loader tool are dev-tooling
+# noise for chat bots; the dsh-skill registry itself stays mounted for the
+# settings page.
+- id: tool-skill
+  disabled: true
+
+# Search: the composite chat provider replaces the stock DeepSeek-only row —
+# DeepSeek native search when the Models-page key exists, keyless DuckDuckGo
+# Lite otherwise, Bing HTML as the final fallback.
+- id: web
+  config:
+    searchProvider: chat-search
+
+- id: web-search-deepseek
+  disabled: true
+
+# ── the chat plugin family ──────────────────────────────────────────────────
+# These three entries are what this overlay exists for; the `web` profile
+# carries no bot registry, no composite search provider, and no group
+# orchestration.
+- insert:
+    - id: chat-bots
+      name: '@deepseek-ai/dsh-chat-bots'
+
+    # Composite search provider (deepseek → duckduckgo → bing degradations).
+    - id: chat-web-search
+      name: '@deepseek-ai/dsh-chat-web-search'
+
+    - id: chat-group
+      name: '@deepseek-ai/dsh-chat-group'
+      config:
+        # 硬上限，不是目标轮数：调度模型判断无人需要回应时会返回 [] 自然终止。
+        # 放宽是因为「你俩聊聊」这类诉求需要多轮一来一回才成形，而每轮都由
+        # 调度模型把关，不会空转烧 token。调小可让群聊更快收束。
+        maxGroupRounds: 10
+        contextWindow: 20
