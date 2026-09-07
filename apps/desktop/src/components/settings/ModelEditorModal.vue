@@ -87,6 +87,11 @@ const outputCtxPlaceholder = computed(() =>
   ctxDefaults.value ? ctxDefaults.value.outputCtx : t("model.ctxDefault"),
 );
 
+/** 展示名称占位符：已填模型 ID 时直接显示它，直观表达「留空即用这个值」 */
+const namePlaceholder = computed(() =>
+  form.model_name.trim() ? form.model_name.trim() : t("model.namePlaceholder"),
+);
+
 function onProviderChange() {
   const p = PROVIDERS.value.find((x) => x.id === form.provider);
   if (p && p.base_url) form.base_url = p.base_url;
@@ -116,11 +121,9 @@ onMounted(async () => {
 });
 
 async function save() {
-  const name = form.name.trim();
-  if (!name) {
-    app.toast(t("model.fillName"));
-    return;
-  }
+  // 全部字段可选；展示名称留空时回退为模型 ID
+  const modelId = form.model_name.trim();
+  const name = form.name.trim() || modelId;
   saving.value = true;
   try {
     const payload = {
@@ -128,7 +131,7 @@ async function save() {
       provider: form.provider,
       base_url: form.base_url.trim(),
       api_key: form.api_key.trim(),
-      model_name: form.model_name.trim(),
+      model_name: modelId,
       tool_use: form.tool_use,
       image_input: form.image_input,
       reasoning_mode: form.reasoning_mode,
@@ -143,7 +146,8 @@ async function save() {
       app.toast(t("common.saved"));
     } else {
       savedModel = await models.create(payload);
-      app.toast(t("model.added", { name }));
+      // 展示名称与模型 ID 都留空时，退化成不带名称的提示
+      app.toast(name ? t("model.added", { name }) : t("common.saved"));
     }
     emit("saved", savedModel);
     emit("close");
@@ -158,17 +162,6 @@ async function save() {
 <template>
   <Modal :title="title" wide @close="emit('close')">
     <div class="flex flex-col gap-4">
-      <!-- 模型名称 -->
-      <div>
-        <label class="mb-1.5 block text-xs font-medium text-mid">{{ t("model.name") }}</label>
-        <input
-          v-model="form.name"
-          type="text"
-          :placeholder="t('model.namePlaceholder')"
-          class="w-full rounded-lg border border-line bg-ink-2/70 px-3 py-2 text-[13px] text-hi outline-none transition-all placeholder:text-lo focus:border-accent/45 focus:shadow-[0_0_0_3px_var(--color-accent-soft)]"
-        />
-      </div>
-
       <!-- 供应商 -->
       <div>
         <label class="mb-1.5 block text-xs font-medium text-mid">{{ t("model.provider") }}</label>
@@ -215,13 +208,24 @@ async function save() {
         </div>
       </div>
 
-      <!-- 模型名称(参数) -->
+      <!-- 模型 ID（发送给供应商的参数，可选） -->
       <div>
         <label class="mb-1.5 block text-xs font-medium text-mid">{{ t("model.modelName") }}</label>
         <input
           v-model="form.model_name"
           type="text"
           :placeholder="t('model.modelNamePlaceholder')"
+          class="w-full rounded-lg border border-line bg-ink-2/70 px-3 py-2.5 text-[13px] text-hi outline-none transition-all placeholder:text-lo focus:border-accent/45 focus:shadow-[0_0_0_3px_var(--color-accent-soft)]"
+        />
+      </div>
+
+      <!-- 展示名称（可选）：留空时回退为模型 ID -->
+      <div>
+        <label class="mb-1.5 block text-xs font-medium text-mid">{{ t("model.name") }}</label>
+        <input
+          v-model="form.name"
+          type="text"
+          :placeholder="namePlaceholder"
           class="w-full rounded-lg border border-line bg-ink-2/70 px-3 py-2.5 text-[13px] text-hi outline-none transition-all placeholder:text-lo focus:border-accent/45 focus:shadow-[0_0_0_3px_var(--color-accent-soft)]"
         />
       </div>

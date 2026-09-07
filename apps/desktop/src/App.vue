@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { onMounted, ref } from "vue";
+import { computed, onMounted, ref } from "vue";
 import NavSidebar from "./components/layout/NavSidebar.vue";
 import TitleBar from "./components/layout/TitleBar.vue";
+import WindowControls from "./components/layout/WindowControls.vue";
 import Toast from "./components/common/Toast.vue";
 import ApprovalModal from "./components/chat/ApprovalModal.vue";
 import BotEditorModal from "./views/BotEditorModal.vue";
@@ -25,6 +26,12 @@ const app = useAppStore();
 const theme = useThemeStore();
 const locale = useLocaleStore();
 const self = useSelfStore();
+const conversations = useConversationsStore();
+
+/** ChatHeader 是否可见：可见时窗口按钮由它承载，否则由顶层兜底渲染 */
+const chatHeaderVisible = computed(
+  () => app.view === "chat" && Boolean(conversations.active),
+);
 
 /** 独立浏览器窗口模式：URL hash 以 #/browser 开头 */
 const isBrowserWindow = ref(window.location.hash.startsWith("#/browser"));
@@ -39,7 +46,6 @@ onMounted(async () => {
 
   const messages = useMessagesStore();
   const bots = useBotsStore();
-  const conversations = useConversationsStore();
   const settings = useSettingsStore();
 
   messages.bindEvents();
@@ -63,6 +69,17 @@ onMounted(async () => {
   <!-- overscroll-behavior: contain 阻止 macOS 弹性滚动穿透到外层（避免 UI 被拽出边界） -->
   <div v-else class="overscroll-contain flex h-full flex-col overflow-hidden">
     <TitleBar />
+    <!-- 无会话（ChatHeader 不渲染）时，Windows 窗口按钮由此兜底显示。
+         内边距（pr-5）与透明下边框（border-b）都对齐 ChatHeader，保证按钮在
+         有/无会话之间切换时不产生偏移。macOS 组件内自行隐藏。 -->
+    <div
+      v-if="!chatHeaderVisible"
+      class="pointer-events-none fixed top-0 right-0 z-40 flex h-13 items-center border-b border-transparent pr-5"
+    >
+      <div class="pointer-events-auto">
+        <WindowControls />
+      </div>
+    </div>
     <div class="flex min-h-0 flex-1">
       <NavSidebar />
       <ChatView v-show="app.view === 'chat'" class="flex min-w-0 flex-1" />

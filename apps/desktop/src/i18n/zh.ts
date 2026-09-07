@@ -67,6 +67,7 @@ export const zh: MessageDict = {
   // 标题栏
   'titlebar.minimize': '最小化',
   'titlebar.maximize': '最大化',
+  'titlebar.restore': '还原',
   'titlebar.close': '关闭',
 
   // 通用
@@ -401,14 +402,13 @@ export const zh: MessageDict = {
   'model.deleted': '已删除',
   'model.edit': '编辑模型',
   'model.addTitle': '添加模型',
-  'model.fillName': '请填写模型名称',
   'model.added': '已添加「{name}」',
-  'model.name': '模型名称 *',
-  'model.namePlaceholder': '如：我的 GPT-4o',
+  'model.name': '展示名称',
+  'model.namePlaceholder': '留空则使用模型 ID',
   'model.provider': '供应商',
   'model.baseUrl': '接口地址',
   'model.apiKeyPlaceholder': '输入你的 API Key',
-  'model.modelName': '模型名称（参数）',
+  'model.modelName': '模型ID',
   'model.modelNamePlaceholder': '如 gpt-4o 或 openai/gpt-4o',
   'model.advanced': '高级配置',
   'model.toolUse': '工具调用',

@@ -13,6 +13,7 @@ import BotAgentBadge from "../contacts/BotAgentBadge.vue";
 import ConfirmModal from "../common/ConfirmModal.vue";
 import Drawer from "../common/Drawer.vue";
 import { openLlmTraceWindow } from "../../utils/llmTrace";
+import WindowControls from "../layout/WindowControls.vue";
 import type { Bot } from "../../types";
 import { t } from "../../i18n";
 
@@ -166,6 +167,8 @@ const subText = computed(() => {
       >
         <MessageSquareText :size="16" :stroke-width="2" />
       </button>
+      <!-- Windows 窗口控制（最小化 / 最大化 / 关闭）：macOS 走原生红绿灯，组件内自行隐藏 -->
+      <WindowControls />
       <!-- <button
         :disabled="botDeleted"
         class="flex h-8 w-8 items-center justify-center rounded-lg text-mid transition-colors hover:bg-ink-3 hover:text-hi disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-mid"

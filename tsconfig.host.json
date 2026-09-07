@@ -256,6 +256,7 @@
     { "path": "./packages/bundle/web-app" },
     { "path": "./packages/chat/chat-bots" },
     { "path": "./packages/chat/chat-group" },
+    { "path": "./packages/chat/chat-web-search" },
     { "path": "./packages/chat/chat-agent" },
     { "path": "./packages/boot/app-boot" },
     { "path": "./packages/boot/cmdline" },

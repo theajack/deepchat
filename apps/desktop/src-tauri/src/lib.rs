@@ -80,19 +80,40 @@ fn resolve_repo_root() -> Option<PathBuf> {
 /// ```
 /// dev（未打包）时 `resource_dir()` 不存在，退回仓库内的同名目录，
 /// 这样 `pnpm tauri dev` 与打包产物走的是同一条路径。
+/// 去掉 Windows 的 `\\?\` verbatim 前缀。
+///
+/// Tauri 在 Windows 上给出的资源目录是 `\\?\D:\...` 形式，Node 无法解析它
+/// （会把前缀后的内容解析错，最终去 lstat `D:`），交给子进程前必须去掉。
+fn without_verbatim_prefix(path: &Path) -> PathBuf {
+    let text = path.to_string_lossy();
+    match text.strip_prefix(r"\\?\") {
+        Some(rest) => PathBuf::from(rest),
+        None => path.to_path_buf(),
+    }
+}
+
+/// 内置 Node 可执行文件名：Windows 官方发行版带 `.exe`，其它平台无扩展名。
+fn bundled_node_name() -> &'static str {
+    if cfg!(windows) {
+        "node.exe"
+    } else {
+        "node"
+    }
+}
+
 fn resolve_bundled_dsh_dir(app: &AppHandle) -> Option<PathBuf> {
     if let Ok(dir) = app.path().resource_dir() {
         // Tauri 把 `bundle.resources` 的条目放在 <resource_dir>/resources 下，
         // 两种布局都认一遍，避免以后调整 resources 配置就找不到运行时。
         for candidate in [dir.join("dsh"), dir.join("resources").join("dsh")] {
-            if candidate.join("node").join("bin").join("node").exists() {
+            if candidate.join("node").join("bin").join(bundled_node_name()).exists() {
                 return Some(candidate);
             }
         }
     }
     let root = resolve_repo_root()?;
     let candidate = root.join("apps").join("desktop").join("src-tauri").join("resources").join("dsh");
-    if candidate.join("node").join("bin").join("node").exists() {
+    if candidate.join("node").join("bin").join(bundled_node_name()).exists() {
         return Some(candidate);
     }
     None
@@ -101,23 +122,25 @@ fn resolve_bundled_dsh_dir(app: &AppHandle) -> Option<PathBuf> {
 /// 打包运行时的启动三元组（program / args / cwd）。
 fn resolve_bundled_command(app: &AppHandle) -> Option<(String, Vec<String>, PathBuf, PathBuf)> {
     let dsh_dir = resolve_bundled_dsh_dir(app)?;
-    let node = dsh_dir.join("node").join("bin").join("node");
-    let bin = dsh_dir
-        .join("runtime")
-        .join("node_modules")
-        .join("@deepseek-ai")
-        .join("dsh")
-        .join("lib")
-        .join("bin.js");
+    let node = without_verbatim_prefix(&dsh_dir.join("node").join("bin").join(bundled_node_name()));
+    let bin = without_verbatim_prefix(
+        &dsh_dir
+            .join("runtime")
+            .join("node_modules")
+            .join("@deepseek-ai")
+            .join("dsh")
+            .join("lib")
+            .join("bin.js"),
+    );
     if !node.exists() || !bin.exists() {
         return None;
     }
     // 运行时目录同时作为 profile 依赖的解析根（见 ensure_dsh_home）
-    let runtime_dir = dsh_dir.join("runtime");
+    let runtime_dir = without_verbatim_prefix(&dsh_dir.join("runtime"));
     Some((
         node.to_string_lossy().to_string(),
         vec![bin.to_string_lossy().to_string(), "--profile".into(), "chat-agent".into()],
-        dsh_dir.clone(),
+        without_verbatim_prefix(&dsh_dir),
         runtime_dir,
     ))
 }
@@ -177,7 +200,41 @@ fn ensure_dsh_home(dsh_home: &Path, runtime_dir: &Path) -> std::io::Result<()> {
             Ok(_) => std::fs::remove_file(&link).or_else(|_| std::fs::remove_dir_all(&link))?,
             Err(_) => {}
         }
-        std::os::unix::fs::symlink(&target, &link)?;
+        link_runtime_modules(&link, &target)?;
+    }
+    Ok(())
+}
+
+/// 把 profile 的 node_modules 指向打包运行时的依赖闭包。
+///
+/// 打包产物在 DSH_HOME 下解析 chat 插件，必须指向运行时的 node_modules：
+/// unix 建目录软链，Windows 建 junction（符号链接要管理员权限，junction 不要）。
+/// 失败时返回 Err，由调用方打印并继续——仓库内 CLI 不依赖这个链接解析依赖。
+fn link_runtime_modules(link: &Path, target: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(target, link)?;
+    }
+    #[cfg(windows)]
+    {
+        // 目录符号链接需要开发者模式或管理员权限，junction（mklink /J）对普通用户可用。
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        let link_text = link.to_string_lossy().into_owned();
+        let target_text = target.to_string_lossy().into_owned();
+        let status = Command::new("cmd")
+            .args(["/C", "mklink", "/J", link_text.as_str(), target_text.as_str()])
+            .creation_flags(CREATE_NO_WINDOW)
+            .status()?;
+        if !status.success() {
+            return Err(std::io::Error::other("mklink /J 创建 node_modules 联接失败"));
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        return Err(std::io::Error::other(
+            "当前平台不支持创建 node_modules 软链",
+        ));
     }
     Ok(())
 }
@@ -242,14 +299,36 @@ fn spawn_dsh(app: &AppHandle) -> std::io::Result<Arc<Mutex<Child>>> {
         }
     }
 
-    let mut child = Command::new(&program)
+    let mut command = Command::new(&program);
+    command
         .args(&args)
         .current_dir(&dsh_home)
         .env("DSH_HOME", &dsh_home)
-        .stdin(Stdio::null())
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .spawn()?;
+        .stdin(Stdio::null());
+    if cfg!(debug_assertions) {
+        // dev：继承终端，宿主日志直接打在启动它的控制台上。
+        command.stdout(Stdio::inherit()).stderr(Stdio::inherit());
+    } else {
+        // 打包产物是 GUI 子系统进程，没有可继承的控制台：把宿主输出落到
+        // DSH_HOME/logs/dsh-host.log，否则启动失败时无从排查。
+        let log_dir = dsh_home.join("logs");
+        std::fs::create_dir_all(&log_dir)?;
+        let log = std::fs::File::create(log_dir.join("dsh-host.log"))?;
+        let log_err = log.try_clone()?;
+        command.stdout(log).stderr(log_err);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        // node.exe 是控制台程序：被 GUI 进程拉起时系统会为它新建一个控制台，
+        // 运行时会闪出黑框。打包构建统一隐藏；dev 保留继承的终端便于调试。
+        if !cfg!(debug_assertions) {
+            command.creation_flags(CREATE_NO_WINDOW);
+        }
+    }
+
+    let mut child = command.spawn()?;
 
     let child = Arc::new(Mutex::new(child));
 
@@ -457,6 +536,30 @@ pub fn run() {
                 if let Some(window) = app.get_webview_window("main") {
                     // setup 运行在主线程，直接调用即可安全操作红绿灯
                     setup_traffic_lights(&window);
+                }
+            }
+
+            // Windows 走自绘标题栏：最小化 / 最大化 / 关闭由 ChatHeader 内的
+            // WindowControls 渲染，这里关掉系统装饰，避免原生标题栏与自绘按钮重复。
+            // macOS 保留系统红绿灯，编译期即排除。
+            #[cfg(target_os = "windows")]
+            {
+                if let Some(window) = app.get_webview_window("main") {
+                    if let Err(e) = window.set_decorations(false) {
+                        eprintln!("[DeepChat] 关闭窗口装饰失败: {e}");
+                    }
+                }
+            }
+
+            #[cfg(windows)]
+            {
+                // Windows 不渲染原生标题栏，最小化/最大化/关闭由前端 TitleBar 自绘。
+                // tauri.windows.conf.json 里的 decorations: false 是创建窗口时的开关，
+                // 这里再兜一次：配置因缓存未重新内嵌时，也保证启动后标题栏被移除。
+                if let Some(window) = app.get_webview_window("main") {
+                    if let Err(e) = window.set_decorations(false) {
+                        eprintln!("[DeepChat] 关闭原生标题栏失败: {e}");
+                    }
                 }
             }
 

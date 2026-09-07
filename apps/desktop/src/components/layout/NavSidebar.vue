@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from "vue";
+import { computed, onMounted } from "vue";
 import { MessageSquare, Settings, User } from "lucide-vue-next";
 import { useAppStore, type ViewName } from "../../stores/app";
 import { useConversationsStore } from "../../stores/conversations";
@@ -17,18 +17,18 @@ const navItems = computed<{ view: ViewName; title: string; icon: typeof MessageS
 
 const hasUnread = computed(() => conversations.totalUnread > 0);
 
-const isMac = ref(false);
+// 同步判定：与 TitleBar 保持一致，避免首帧多/少一段红绿灯占位
+const isMac = /Mac|iPod|iPhone|iPad/.test(navigator.platform);
 onMounted(() => {
-  isMac.value = /Mac|iPod|iPhone|iPad/.test(navigator.platform);
   if (!selfStore.loaded) void selfStore.load();
 });
 </script>
 
 <template>
   <aside class="flex w-15 shrink-0 flex-col items-center border-r border-line bg-ink-2/60">
-    <!-- Mac 原生红绿灯由系统 titleBarStyle: Overlay 自动渲染，此处仅保留占位高度 -->
+    <!-- Mac 原生红绿灯由系统 titleBarStyle: Overlay 自动渲染，此处仅保留占位高度。
+         Windows 无原生标题栏，自绘标题栏在上方独占一行，这里不需要占位。 -->
     <div v-if="isMac" class="h-9 w-full" data-tauri-drag-region />
-    <div v-else class="h-9 w-full" />
 
     <!-- 用户头像 + 导航项 -->
     <div class="flex flex-1 flex-col items-center gap-1.5 py-4">

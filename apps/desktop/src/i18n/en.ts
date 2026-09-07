@@ -67,6 +67,7 @@ export const en: MessageDict = {
   // Title bar
   'titlebar.minimize': 'Minimize',
   'titlebar.maximize': 'Maximize',
+  'titlebar.restore': 'Restore',
   'titlebar.close': 'Close',
 
   // Common
@@ -401,14 +402,13 @@ export const en: MessageDict = {
   'model.deleted': 'Deleted',
   'model.edit': 'Edit model',
   'model.addTitle': 'Add model',
-  'model.fillName': 'Please enter a model name',
   'model.added': 'Added "{name}"',
-  'model.name': 'Model name *',
-  'model.namePlaceholder': 'e.g. My GPT-4o',
+  'model.name': 'Display name',
+  'model.namePlaceholder': 'Defaults to the model ID',
   'model.provider': 'Provider',
   'model.baseUrl': 'Base URL',
   'model.apiKeyPlaceholder': 'Enter your API key',
-  'model.modelName': 'Model name (parameter)',
+  'model.modelName': 'Model ID',
   'model.modelNamePlaceholder': 'e.g. gpt-4o or openai/gpt-4o',
   'model.advanced': 'Advanced',
   'model.toolUse': 'Tool calling',

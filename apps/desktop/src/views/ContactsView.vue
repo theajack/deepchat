@@ -405,16 +405,8 @@ async function removeMember(bot: Bot) {
     <main class="flex min-w-0 flex-1 flex-col bg-chat">
       <!-- AI 好友详情 -->
       <template v-if="selectedBot">
-        <header class="flex h-13 shrink-0 items-center justify-between border-b border-line bg-ink-1/50 px-6">
+        <header class="flex h-13 shrink-0 items-center border-b border-line bg-ink-1/50 px-6">
           <h2 class="text-sm font-semibold tracking-wide text-hi">{{ t("contacts.botDetail") }}</h2>
-          <div class="flex gap-2">
-            <button
-              class="flex items-center gap-1.5 rounded-lg border border-line-strong/60 px-3 py-1.5 text-xs text-mid transition-all hover:border-accent/40 hover:bg-ink-3 hover:text-hi"
-              @click="app.openGroupEditor(undefined, selectedBot ? [selectedBot.id] : undefined)"
-            >
-              <Users :size="14" /> {{ t("contacts.startGroup") }}
-            </button>
-          </div>
         </header>
 
         <div class="flex-1 overflow-y-auto p-6">
@@ -449,6 +441,13 @@ async function removeMember(bot: Bot) {
                 @click="chatWithBot(selectedBot)"
               >
                 <MessageCircle :size="16" /> {{ t("contacts.sendMessage") }}
+              </button>
+              <button
+                class="flex items-center justify-center rounded-xl border border-line-strong/50 px-4 py-2.5 text-mid transition-colors hover:border-accent/40 hover:bg-ink-3 hover:text-hi"
+                :title="t('contacts.startGroup')"
+                @click="app.openGroupEditor(undefined, selectedBot ? [selectedBot.id] : undefined)"
+              >
+                <Users :size="16" />
               </button>
               <button
                 class="flex items-center justify-center rounded-xl border border-line-strong/50 px-4 py-2.5 text-mid transition-colors hover:border-accent/40 hover:bg-ink-3 hover:text-hi"
