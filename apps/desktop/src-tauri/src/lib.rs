@@ -49,7 +49,6 @@ fn setup_traffic_lights(window: &tauri::WebviewWindow) {
 
 /// dsh 宿主子进程句柄（`dsh --profile chat-agent`）
 struct DshState {
-    #[allow(dead_code)]
     child: Mutex<Option<Arc<Mutex<Child>>>>,
 }
 
@@ -524,7 +523,7 @@ fn on_page_load(webview: &tauri::Webview, payload: &tauri::webview::PageLoadPayl
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_http::init())
         // 原生文件/目录选择对话框（好友工作目录选择）
@@ -590,6 +589,25 @@ pub fn run() {
             browser_get_title,
             browser_create_tab,
         ])
-        .run(tauri::generate_context!())
+        .build(tauri::generate_context!())
         .expect("error while running tauri application");
+
+    // 退出时收掉 dsh 宿主：否则关闭窗口后 node 仍驻留并占着 3180 端口，
+    // 下次启动会因端口被占用而拿不到后端。
+    app.run(|handle, event| {
+        if !matches!(event, tauri::RunEvent::Exit) {
+            return;
+        }
+        let Some(state) = handle.try_state::<DshState>() else {
+            return;
+        };
+        let Ok(guard) = state.child.lock() else {
+            return;
+        };
+        if let Some(child) = guard.as_ref() {
+            if let Ok(mut child) = child.lock() {
+                let _ = child.kill();
+            }
+        }
+    });
 }
