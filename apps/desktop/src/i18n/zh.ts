@@ -1,6 +1,9 @@
 import type { MessageDict } from './types'
 
 export const zh: MessageDict = {
+  // 启动
+  'app.booting': '正在启动本地服务，首次启动可能需要一两分钟…',
+  'app.backendTimeout': '本地服务启动超时，请关闭应用后重新打开重试',
   // 通用设置
   'general.theme': '主题外观',
   'general.themeDesc': '选择浅色、深色或跟随系统配色',

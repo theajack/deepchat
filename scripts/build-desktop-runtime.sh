@@ -19,6 +19,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 STAGE="$REPO_ROOT/apps/desktop/src-tauri/resources/dsh"
 RUNTIME_DIR="$STAGE/runtime"
 NODE_DIR="$STAGE/node"
+SKILL_DIR="$STAGE/skills"
 
 ARCH="$(uname -m)"
 case "$ARCH" in
@@ -114,5 +115,17 @@ for (let pass = 0; pass < 10; pass++) {
 console.log(`==> materialized symlinks: ${total}`)
 ' "$RUNTIME_DIR/node_modules"
 
+# 内置技能：仓库 .agents/skills 在 dev 模式下靠「cwd=仓库被当作项目根」被扫到，
+# 打包后 cwd 是 DSH_HOME，全新机器上没有任何技能来源。随包分发一份，宿主通过
+# DSH_BUNDLED_SKILL_DIR 注册（source=bundled，受信）。
+if [ -d "$REPO_ROOT/.agents/skills" ]; then
+  rm -rf "$SKILL_DIR"
+  mkdir -p "$SKILL_DIR"
+  cp -R "$REPO_ROOT/.agents/skills/." "$SKILL_DIR/"
+  echo "==> bundled skills: $(ls "$SKILL_DIR" | wc -l | tr -d ' ') entries"
+else
+  echo "==> no .agents/skills in repo, skipping bundled skills"
+fi
+
 echo "==> runtime staged:"
-du -sh "$NODE_DIR" "$RUNTIME_DIR"
+du -sh "$NODE_DIR" "$RUNTIME_DIR" "$SKILL_DIR"

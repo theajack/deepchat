@@ -1,6 +1,9 @@
 import type { MessageDict } from './types'
 
 export const en: MessageDict = {
+  // Boot
+  'app.booting': 'Starting the local service — this can take a minute or two on first launch…',
+  'app.backendTimeout': 'The local service failed to start in time. Please close and reopen the app.',
   // General settings
   'general.theme': 'Appearance',
   'general.themeDesc': 'Choose light, dark, or follow the system',

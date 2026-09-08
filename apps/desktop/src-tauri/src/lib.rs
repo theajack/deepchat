@@ -304,6 +304,15 @@ fn spawn_dsh(app: &AppHandle) -> std::io::Result<Arc<Mutex<Child>>> {
         .current_dir(&dsh_home)
         .env("DSH_HOME", &dsh_home)
         .stdin(Stdio::null());
+    if let Some(runtime) = &runtime_dir {
+        // 内置技能随包分发（resources/dsh/skills，与 runtime 目录同级）。
+        // 宿主的 skill-filesystem 据此注册 source=bundled 的技能——否则全新
+        // 机器上既没有项目根技能也没有用户技能，技能面板会是空的。
+        let skills_dir = runtime.parent().unwrap_or(runtime).join("skills");
+        if skills_dir.is_dir() {
+            command.env("DSH_BUNDLED_SKILL_DIR", &skills_dir);
+        }
+    }
     if cfg!(debug_assertions) {
         // dev：继承终端，宿主日志直接打在启动它的控制台上。
         command.stdout(Stdio::inherit()).stderr(Stdio::inherit());
@@ -346,10 +355,12 @@ fn spawn_dsh(app: &AppHandle) -> std::io::Result<Arc<Mutex<Child>>> {
         std::thread::sleep(Duration::from_millis(500));
     });
 
-    // 就绪探测：轮询 TCP 端口，成功后通知前端
+    // 就绪探测：轮询 TCP 端口，成功后通知前端。
+    // 期限给足 3 分钟：打包版宿主要加载 200+ 依赖包 + 全套插件，
+    // 全新机器冷启动实测 1~2 分钟，60 秒会误报超时。
     let ready = app.clone();
     std::thread::spawn(move || {
-        let deadline = Instant::now() + Duration::from_secs(60);
+        let deadline = Instant::now() + Duration::from_secs(180);
         while Instant::now() < deadline {
             if TcpStream::connect((DSH_HOST, DSH_PORT)).is_ok() {
                 let _ = ready.emit("dsh.ready", json!({ "url": format!("http://{DSH_HOST}:{DSH_PORT}") }));
