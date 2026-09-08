@@ -266,6 +266,9 @@ export class McpService {
       lines.push('  name: \'@deepseek-ai/dsh-mcp-client\'')
       lines.push(`  config: ${config}`)
     }
+    // 空列表也保持合法 YAML（顶层 []）：只有注释的文件会被 YAML 解析成
+    // null，loader 的 parsePatchList 直接拒绝启动 —— 这正是踩过的坑。
+    if (store.servers.length === 0) lines.push('[]')
     const file = join(dshHome, 'profiles', 'chat-agent', 'cordis.mcp.yml')
     await mkdir(dirname(file), { recursive: true })
     await writeFile(file, `${lines.join('\n')}\n`, 'utf8')

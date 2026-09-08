@@ -401,9 +401,17 @@ export function loadProfile(
     : []
   // DeepChat MCP 面板写入的附加层：每个 MCP 服务一个 mcp-client 实例。
   // 与手编 cordis.patch.yml 分开存放，避免面板写入时破坏用户手写内容。
+  // 该文件由程序管理，内容可能为空（只剩注释）或历史版本残留格式 —— 任何
+  // 解析失败都只告警跳过，绝不能挡住宿主启动（手编 cordis.patch.yml 仍然
+  // 失败即抛，那是用户自己写错的）。
   const mcpPatchPath = join(dir, 'cordis.mcp.yml')
   if (options.userLayer !== false && existsSync(mcpPatchPath)) {
-    patches.push(...loadOverlayPatches(binName, mcpPatchPath))
+    try {
+      const mcpPatches = loadOverlayPatches(binName, mcpPatchPath)
+      if (mcpPatches.length > 0) patches.push(...mcpPatches)
+    } catch (error: unknown) {
+      console.warn(`${binName}: ignoring malformed managed overlay ${mcpPatchPath}: ${error instanceof Error ? error.message : String(error)}`)
+    }
   }
   return { name, dir, layers, patchPath, patches }
 }
