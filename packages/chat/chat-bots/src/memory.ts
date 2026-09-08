@@ -5,6 +5,8 @@ import type { Session } from '@deepseek-ai/dsh-session'
 import {
   BlockAssembler,
   createUserMessage,
+  LlmError,
+  ReasoningEffortId,
   type ContentBlock,
   type GenerateOptions,
 } from '@deepseek-ai/dsh-llm'
@@ -211,9 +213,28 @@ export async function consolidateMemory(options: ConsolidateOptions): Promise<bo
       source: { kind: 'plugin', plugin: 'dsh-chat-bots' },
     })],
     maxTokens: MAX_OUTPUT_TOKENS,
+    // 总结是一次后台批处理：开思维链只会拖慢蒸馏、白烧 token。
+    // 注意：'off' 并非所有模型都有这一档（pi-ai 手工声明的自定义端点没有
+    // reasoning 元数据，显式请求任何档位都会被 resolveCallConfig 拒绝），
+    // 所以先探一次能力，不支持就退化为不指定——蒸馏必须比"关思维链"更优先。
+    reasoningEffort: ReasoningEffortId('off'),
   }
 
-  for await (const chunk of options.ctx.llm.stream(request)) assembler.push(chunk)
+  let finalRequest = request
+  try {
+    await options.ctx.llm.resolveCallConfig(request)
+  } catch (error: unknown) {
+    if (error instanceof LlmError && error.code === 'UNSUPPORTED_REASONING_EFFORT') {
+      // exactOptionalPropertyTypes：不能用 reasoningEffort: undefined 覆盖，
+      // 解构剔除该键
+      const { reasoningEffort: _omit, ...rest } = request
+      finalRequest = rest
+    } else {
+      throw error
+    }
+  }
+
+  for await (const chunk of options.ctx.llm.stream(finalRequest)) assembler.push(chunk)
   const finish = assembler.finish
   if (finish.kind !== 'stop') {
     const detail = finish as { kind: string; error?: unknown }

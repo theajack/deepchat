@@ -339,6 +339,15 @@ watch(
       {{ t("chat.scrollUpForMore") }}
     </div>
 
+    <!-- 清空会话后的记忆总结：顶部居中灰色小字 loading，结束后消失 -->
+    <div
+      v-if="conv && messages.consolidating[conv.id]"
+      class="sticky top-0 z-10 flex items-center justify-center gap-2 bg-ink-1/80 py-2 text-[11px] text-lo/60 backdrop-blur-sm"
+    >
+      <Spinner :size="12" class="text-lo/40" />
+      <span>{{ t("chat.summarizing") }}</span>
+    </div>
+
     <template v-for="row in rows" :key="row.key">
       <div v-if="row.type === 'time'" class="my-2 flex items-center justify-center gap-3">
         <span class="h-px w-10 bg-gradient-to-r from-transparent to-line-strong" />

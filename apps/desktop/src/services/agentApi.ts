@@ -74,6 +74,8 @@ export interface McpServerInfo {
   health: 'disconnected' | 'connecting' | 'connected' | 'error'
   toolCount: number
   error?: string
+  /** 连接测试拉到的工具列表（仅 test() 之后有值） */
+  tools?: McpToolInfo[]
 }
 
 export interface McpToolInfo {

@@ -399,6 +399,12 @@ export function loadProfile(
   const patches = options.userLayer !== false && existsSync(patchPath)
     ? loadOverlayPatches(binName, patchPath)
     : []
+  // DeepChat MCP 面板写入的附加层：每个 MCP 服务一个 mcp-client 实例。
+  // 与手编 cordis.patch.yml 分开存放，避免面板写入时破坏用户手写内容。
+  const mcpPatchPath = join(dir, 'cordis.mcp.yml')
+  if (options.userLayer !== false && existsSync(mcpPatchPath)) {
+    patches.push(...loadOverlayPatches(binName, mcpPatchPath))
+  }
   return { name, dir, layers, patchPath, patches }
 }
 

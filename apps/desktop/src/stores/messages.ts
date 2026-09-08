@@ -66,6 +66,8 @@ export const useMessagesStore = defineStore('messages', () => {
   const loadingMore = ref(false)
   /** 群聊正在决策由谁发言（conversationId → 是否决策中） */
   const scheduling = ref<Record<string, boolean>>({})
+  /** 清空会话后的记忆总结进行中（conversationId → 是否总结中） */
+  const consolidating = ref<Record<string, boolean>>({})
   /** 定位请求：搜索弹窗点击「定位」后，MessageList 滚动到该消息；nonce 用于重复定位同一条消息 */
   const locate = ref<{ conversationId: string; messageId: string; nonce: number } | null>(null)
 
@@ -629,6 +631,16 @@ export const useMessagesStore = defineStore('messages', () => {
           }
           break
         }
+        case 'memory.consolidation': {
+          // 清空会话后的记忆总结进行中：聊天框顶部显示居中灰色小字 loading
+          const f = frame.data as { conversationId: string; botId: string; active: boolean }
+          if (f.active) {
+            consolidating.value = { ...consolidating.value, [f.conversationId]: true }
+          } else {
+            consolidating.value = omitKey(consolidating.value, f.conversationId)
+          }
+          break
+        }
         case 'group.scheduling': {
           // 群聊决策中：显示"成员正在思考"，决策结束立即关闭
           const f = frame.data as { conversationId: string; active: boolean }
@@ -699,6 +711,6 @@ export const useMessagesStore = defineStore('messages', () => {
   return {
     byConv, streams, typing, toolCalls, getToolCalls, getSegments,
     load, loadMore, send, stopGeneration, bindEvents, cleanupDrafts, clearLocal,
-    locate, requestLocate, hasMoreByConv, loadingMore, scheduling,
+    locate, requestLocate, hasMoreByConv, loadingMore, scheduling, consolidating,
   }
 })

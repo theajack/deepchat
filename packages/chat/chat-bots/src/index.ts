@@ -909,6 +909,10 @@ export class ChatBots extends Service {
    */
   consolidateBotMemory(bot: BotRecord, rows: readonly MemorySourceRow[]): void {
     if (rows.length === 0) return
+    const conversationId = `private:${bot.id}`
+    // 通知前端开始总结：聊天框顶部显示 loading，结束后撤掉。
+    // 放在链条外同步发，保证事件先于任何后续请求到达。
+    this.broadcast('memory.consolidation', { conversationId, botId: bot.id, active: true })
     const previous = this.pendingMemory.get(bot.id) ?? Promise.resolve()
     const next = previous.then(async () => {
       const model = this.defaultModel?.resolve()
@@ -931,7 +935,20 @@ export class ChatBots extends Service {
     this.pendingMemory.set(bot.id, next)
     void next.finally(() => {
       if (this.pendingMemory.get(bot.id) === next) this.pendingMemory.delete(bot.id)
+      this.broadcast('memory.consolidation', { conversationId, botId: bot.id, active: false })
     })
+  }
+
+  /**
+   * Resolves once the bot's in-flight memory consolidation (if any) has landed.
+   *
+   * The send path awaits this before queuing a reply: the consolidated memory
+   * (typically from the conversation that was just cleared) must be in the
+   * agent's system prompt before it answers, otherwise the bot "forgets" the
+   * relationship for one turn.
+   */
+  async whenMemorySettled(id: string): Promise<void> {
+    await this.pendingMemory.get(id)
   }
 
   /**
@@ -1655,6 +1672,61 @@ export class ChatBots extends Service {
       },
     })
 
+    // ── MCP 服务管理：配置存 $DSH_HOME/mcp/servers.json，连接由
+    // dsh-mcp-client 实例承载（进程内热插拔：写配置 → 同步重载）。──
+    this.ctx.webServer.register({
+      kind: 'prefix',
+      path: '/chatapi/mcp',
+      handler: async (req, res) => {
+        try {
+          const url = (req.url ?? '').split('?')[0] ?? ''
+          const match = /^\/chatapi\/mcp(?:\/([^/]+))?(\/test)?$/.exec(url)
+          if (match === null) return json(res, 404, { error: 'not found' })
+          const rawId = match[1]
+          const testing = match[2] === '/test'
+
+          if (rawId === undefined) {
+            if (req.method !== 'GET') return json(res, 405, { error: 'method not allowed' })
+            const { McpService } = await import('./mcp.ts')
+            const service = new McpService(this.ctx)
+            return json(res, 200, { items: await service.list() })
+          }
+
+          // POST /chatapi/mcp — 新增（支持整体 JSON：serverName + transport 配置）
+          if (rawId === '-' && !testing && req.method === 'POST') {
+            const body = await readBody(req)
+            const { McpService } = await import('./mcp.ts')
+            const service = new McpService(this.ctx)
+            const record = await service.add(body)
+            return json(res, 200, record)
+          }
+
+          const id = decodeURIComponent(rawId)
+          const { McpService } = await import('./mcp.ts')
+          const service = new McpService(this.ctx)
+
+          // POST /chatapi/mcp/:id/test — 连接测试（列工具）
+          if (testing) {
+            if (req.method !== 'POST') return json(res, 405, { error: 'method not allowed' })
+            return json(res, 200, await service.test(id))
+          }
+
+          if (req.method === 'DELETE') {
+            await service.remove(id)
+            return json(res, 200, { removed: true })
+          }
+          if (req.method === 'PUT') {
+            const body = await readBody(req)
+            return json(res, 200, await service.update(id, body))
+          }
+          return json(res, 405, { error: 'method not allowed' })
+        } catch (error: unknown) {
+          const message = error instanceof Error ? error.message : String(error)
+          return json(res, 400, { error: message })
+        }
+      },
+    })
+
     this.ctx.webServer.register({
       kind: 'prefix',
       path: '/chatapi/tools',
@@ -1862,6 +1934,9 @@ export class ChatBots extends Service {
                   `[文档 ${name}]\n已保存到你的工作区：\`${ref}\`\n请用 read_document 读取该文件（不要用 read，read 无法处理二进制文档）。`
               }
             }
+            // 记忆总结（清空会话触发的蒸馏）尚未落地时先等它：总结结果要写进
+            // system prompt 的记忆段，不等的话这一轮回复会"失忆"。
+            await this.whenMemorySettled(botId)
             const agent = await this.ensureAgent(botId)
             // 附件事件必须先于 followup 追加：followup 只是把消息排进 inbox，
             // 真正的 user/message 事件由 driver 稍后写入，届时才有 seq 可关联。

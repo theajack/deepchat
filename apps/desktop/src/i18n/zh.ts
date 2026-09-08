@@ -235,6 +235,7 @@ export const zh: MessageDict = {
   'contacts.noMemberMatch': '没有匹配的成员',
   'chat.botDeleted': '好友已删除',
   'chat.scrollUpForMore': '向上滚动加载更早的消息',
+  'chat.summarizing': '正在总结历史对话…',
   'chat.groupScheduling': '群聊成员正在思考中',
   'conv.botDeleted': '好友已删除',
   'contacts.editGroup': '编辑群聊',
@@ -497,6 +498,12 @@ export const zh: MessageDict = {
   'mcp.testing': '测试中…',
   'mcp.toolsCount': '{transport} · {count} 个工具',
   'mcp.empty': '尚未添加任何 MCP 服务。',
+  'mcp.modeForm': '表单',
+  'mcp.modeJson': 'JSON',
+  'mcp.jsonEmpty': '请输入 JSON 配置',
+  'mcp.jsonInvalid': 'JSON 解析失败',
+  'mcp.jsonNotObject': 'JSON 顶层必须是对象',
+  'mcp.jsonFillExample': '填入示例',
 
   // 调试面板
   'debug.enterUrl': '请输入 URL',

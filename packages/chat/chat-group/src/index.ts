@@ -838,6 +838,9 @@ export class ChatGroup extends Service {
     mode: 'reply' | 'idle' = 'reply',
   ): Promise<TriggerMessage | null> {
     await traceGroup(`speak(${bot.id}): start`)
+    // 成员的记忆总结（清空会话触发）未落地前先等：蒸馏结果要先进它的
+    // system prompt，否则这次发言对刚沉淀的关系一无所知。
+    await this.ctx.chatBots.whenMemorySettled(bot.id)
     let container: Awaited<ReturnType<typeof this.containerAgent>>
     try {
       container = await this.containerAgent(group.id)

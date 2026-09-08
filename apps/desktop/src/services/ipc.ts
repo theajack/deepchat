@@ -794,10 +794,30 @@ export class DshTransport implements IpcTransport {
       return await dshSend<T>('DELETE', '/chatapi/llm-trace')
     }
 
+    // ── MCP 服务管理（/chatapi/mcp）──
+    if (method === 'mcp.list') {
+      return await dshSend<T>('GET', '/chatapi/mcp')
+    }
+    if (method === 'mcp.add') {
+      return await dshSend<T>('POST', '/chatapi/mcp/-', params)
+    }
+    if (method === 'mcp.update') {
+      return await dshSend<T>('PUT', `/chatapi/mcp/${encodeURIComponent(String(params.id))}`, params)
+    }
+    if (method === 'mcp.remove') {
+      return await dshSend<T>('DELETE', `/chatapi/mcp/${encodeURIComponent(String(params.id))}`)
+    }
+    if (method === 'mcp.test') {
+      return await dshSend<T>('POST', `/chatapi/mcp/${encodeURIComponent(String(params.id))}/test`)
+    }
+    if (method === 'mcp.tools') {
+      const r = await dshSend<{ tools: Array<{ name: string; description?: string }> }>('POST', `/chatapi/mcp/${encodeURIComponent(String(params.id))}/test`)
+      return r.tools as T
+    }
+
     // persona 生成走 chatApi 的 SSE 流式接口（POST /chatapi/persona/generate），
     // 不经过这里的请求/响应信封 —— 它需要逐 delta 回调而非一次性结果。
     if (method.startsWith('model.')) throw new Error(NOT_MIGRATED)
-    if (method.startsWith('mcp.')) throw new Error(NOT_MIGRATED)
 
     throw new Error(`${t('ipc.timeout', { ms: 0, method })}: unknown method ${method}`)
   }

@@ -5,6 +5,9 @@ import SectionBlock from "../components/debug/SectionBlock.vue";
 import { agentApi, type LlmTraceEntry, type UploadTraceEntry } from "../services/agentApi";
 import { t } from "../i18n";
 
+// 平台判定必须同步完成，否则首帧会先闪出另一平台的布局
+const isMac = /Mac|iPod|iPhone|iPad/.test(navigator.platform);
+
 const traces = ref<LlmTraceEntry[]>([]);
 const uploads = ref<UploadTraceEntry[]>([]);
 /** 上传记录区块是否展开 */
@@ -109,8 +112,8 @@ onBeforeUnmount(() => {
       data-tauri-drag-region
       @mousedown="startDrag"
     >
-      <!-- macOS 红绿灯占位，避免标题被遮挡 -->
-      <div class="w-16 shrink-0" data-tauri-drag-region />
+      <!-- macOS 红绿灯占位，避免标题被遮挡；Windows 自绘按钮在右侧，左侧无需留白 -->
+      <div v-if="isMac" class="w-16 shrink-0" data-tauri-drag-region />
       <Cpu :size="15" class="text-accent" />
       <h2 class="text-[13px] font-semibold text-hi">{{ t("debug.llmTraceTitle") }}</h2>
       <span class="rounded bg-ink-2 px-1.5 py-0.5 font-mono text-[11px] text-lo">{{ traces.length }}</span>

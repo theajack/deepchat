@@ -235,6 +235,7 @@ export const en: MessageDict = {
   'contacts.noMemberMatch': 'No matching members',
   'chat.botDeleted': 'Friend deleted',
   'chat.scrollUpForMore': 'Scroll up for earlier messages',
+  'chat.summarizing': 'Summarizing conversation history…',
   'chat.groupScheduling': 'Group members are thinking',
   'conv.botDeleted': 'Friend deleted',
   'contacts.editGroup': 'Edit group',
@@ -497,6 +498,12 @@ export const en: MessageDict = {
   'mcp.testing': 'Testing…',
   'mcp.toolsCount': '{transport} · {count} tools',
   'mcp.empty': 'No MCP services added yet.',
+  'mcp.modeForm': 'Form',
+  'mcp.modeJson': 'JSON',
+  'mcp.jsonEmpty': 'Please enter a JSON config',
+  'mcp.jsonInvalid': 'Failed to parse JSON',
+  'mcp.jsonNotObject': 'Top-level JSON must be an object',
+  'mcp.jsonFillExample': 'Fill example',
 
   // Debug panel
   'debug.enterUrl': 'Please enter a URL',
