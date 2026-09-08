@@ -796,7 +796,9 @@ export class DshTransport implements IpcTransport {
 
     // ── MCP 服务管理（/chatapi/mcp）──
     if (method === 'mcp.list') {
-      return await dshSend<T>('GET', '/chatapi/mcp')
+      // 端点返回 { items: [...] }，这里解包成数组再给上层
+      const r = await dshSend<{ items: T }>('GET', '/chatapi/mcp')
+      return (r ?? { items: [] as T }).items
     }
     if (method === 'mcp.add') {
       return await dshSend<T>('POST', '/chatapi/mcp/-', params)

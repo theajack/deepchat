@@ -77,6 +77,15 @@ export interface McpServerInfo {
   error?: string
   /** 连接测试拉到的工具列表（仅 test() 之后有值） */
   tools?: McpToolInfo[]
+  // ── 以下为完整配置字段（后端 list 随记录一并返回，供编辑预填）──
+  serverName?: string
+  command?: string
+  args?: string[]
+  env?: Record<string, string>
+  cwd?: string
+  url?: string
+  headers?: Record<string, string>
+  toolCallTimeoutMs?: number
 }
 
 export interface McpToolInfo {

@@ -316,6 +316,16 @@ watch(
   },
   { flush: "post" },
 );
+// 用户自己发出消息：强制拉到底部（即便正在翻历史），并恢复"贴底"状态，
+// 这样后续 AI 回复也会持续跟随滚动
+watch(
+  () => messages.scrollSignal,
+  ({ conversationId }) => {
+    if (conversationId !== conv.value?.id) return;
+    stickToBottom.value = true;
+    scrollBottom(true);
+  },
+);
 // 搜索定位：搜索弹窗点击「定位」后，滚动到指定消息
 watch(
   () => messages.locate,

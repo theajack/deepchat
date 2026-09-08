@@ -210,19 +210,37 @@ export const useConversationsStore = defineStore('conversations', () => {
       c.id === convId ? { ...c, name: bot.name, avatar: bot.avatar ?? c.avatar } : c)
   }
 
+  /**
+   * 未读数 +1：会话不在前台时收到一条 AI 消息。
+   *
+   * 后端广播的 conversation 对象里 unread_count 恒为 0（它只是个占位快照，
+   * 服务端不知道用户当前在看哪个会话），所以未读只能在前端累加。
+   */
+  function bumpUnread(convId: string) {
+    // 正在查看的会话不产生未读
+    if (convId === activeId.value) return
+    const idx = items.value.findIndex(c => c.id === convId)
+    if (idx < 0) return
+    const target = items.value[idx]
+    if (target === undefined) return
+    items.value[idx] = { ...target, unread_count: target.unread_count + 1 }
+  }
+
   /** CLI 事件：conversation.updated */
   function applyUpdate(conv: Conversation) {
-    // 正在查看的会话不产生未读
-    if (conv.id === activeId.value && conv.unread_count > 0) {
-      conv = { ...conv, unread_count: 0 }
+    const prev = items.value.find(c => c.id === conv.id)
+    // 后端恒传 unread_count: 0，直接 upsert 会把前端累加的未读清零，
+    // 所以这里以本地值为准；只有正在查看的会话才归零。
+    const unread = conv.id === activeId.value ? 0 : (prev?.unread_count ?? conv.unread_count)
+    if (conv.id === activeId.value && (prev?.unread_count ?? 0) > 0) {
       void chatApi.markConversationRead(conv.id)
     }
-    upsert(conv)
+    upsert({ ...conv, unread_count: unread })
   }
 
   return {
     items, activeId, active, loading, chatList, totalUnread, membersMap, load, select, createPrivate, createGroup,
     loadMembers, addMember, removeMember, updateGroup, remove, applyUpdate, clearMessages, deleteSession, syncMemberBot,
-    pinnedTop, isPinnedTop, togglePinTop,
+    pinnedTop, isPinnedTop, togglePinTop, bumpUnread,
   }
 })

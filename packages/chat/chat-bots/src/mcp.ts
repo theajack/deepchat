@@ -22,6 +22,7 @@ export interface McpStdioConfig {
   args: string[]
   env: Record<string, string>
   cwd?: string
+  toolCallTimeoutMs?: number
 }
 
 /** streamable-http 型服务配置 */
@@ -30,6 +31,7 @@ export interface McpHttpConfig {
   serverName: string
   url: string
   headers: Record<string, string>
+  toolCallTimeoutMs?: number
 }
 
 export type McpServerConfig = McpStdioConfig | McpHttpConfig
@@ -48,53 +50,109 @@ interface McpStoreFile {
 
 const EMPTY_STORE: McpStoreFile = { servers: [] }
 
-/** 前端兼容层：旧表单的 transport 值 → mcp-client transport 值 */
+/**
+ * 一个 MCP 服务的连接状态。
+ *
+ * 由装载方在运行时维护：装载开始 → connecting，插件激活完成 → connected，
+ * 激活抛错 → error。没有记录表示尚未装载。
+ */
+export type McpStatus = 'connecting' | 'connected' | 'error' | 'disconnected'
+
+/** 一个 MCP 服务在列表接口中的视图：服务记录 + 实时状态/工具数/错误信息。 */
+export type McpServerView = McpServerRecord & {
+  health: McpStatus
+  toolCount: number
+  error: string
+}
+
+/**
+ * 各家 MCP 客户端对 transport 的写法 → mcp-client transport 值。
+ *
+ * 实测见过的写法：`stdio` / `streamable-http` / `streamableHttp`（驼峰）/
+ * `http` / `https` / `sse`，以及写在 `type` 或 `transportType` 字段上。
+ */
 const TRANSPORT_MAP: Record<string, 'stdio' | 'streamable-http'> = {
   stdio: 'stdio',
   'streamable-http': 'streamable-http',
+  streamablehttp: 'streamable-http',
   http: 'streamable-http',
+  https: 'streamable-http',
   sse: 'streamable-http',
 }
 
-/** 兼容任意输入的宽松解析：表单字段或整体 JSON 均可 */
-export function parseMcpInput(raw: unknown): McpServerConfig {
+/** 支持批量：识别出 `{ mcpServers: { name: cfg } }` 字典，逐条解析 */
+export function parseMcpInputs(raw: unknown): McpServerConfig[] {
   if (typeof raw !== 'object' || raw === null) throw new Error('mcp config must be an object')
   const body = raw as Record<string, unknown>
 
-  // 形态一：标准 mcp-client config（带 transport 字段）
-  const rawTransport = typeof body.transport === 'string' ? body.transport : ''
-  if (rawTransport === 'stdio' || rawTransport === 'streamable-http') {
-    return normalizeKnown(body)
+  // 形态零：标准客户端配置 { mcpServers: { <name>: cfg } } —— key 即 serverName。
+  // 这是 Cursor / Claude Desktop / Cline 的通用格式，一次可导入多个服务。
+  const dict = body.mcpServers
+  if (typeof dict === 'object' && dict !== null && !Array.isArray(dict)) {
+    const configs: McpServerConfig[] = []
+    const problems: string[] = []
+    for (const [name, entry] of Object.entries(dict)) {
+      if (typeof entry !== 'object' || entry === null) continue
+      const cfg = entry as Record<string, unknown>
+      // 显式 disabled 的服务不导入（如示例里的 "Figma"）
+      if (cfg.disabled === true) continue
+      try {
+        configs.push(normalizeServer(name, cfg))
+      } catch (error: unknown) {
+        problems.push(`${name}: ${error instanceof Error ? error.message : String(error)}`)
+      }
+    }
+    // 全部失败时把原因抛给前端，部分失败则导入成功的那些
+    if (configs.length === 0) {
+      throw new Error(problems.length > 0
+        ? `no importable servers in "mcpServers": ${problems.join('; ')}`
+        : 'no enabled servers found in "mcpServers"')
+    }
+    return configs
   }
 
-  // 形态二：旧表单 / 简化 JSON（transport: stdio|sse|http）
-  const mapped = TRANSPORT_MAP[rawTransport]
-  if (rawTransport !== '' && mapped !== undefined) {
-    return normalizeKnown({ ...body, transport: mapped })
-  }
-
-  // 形态三：无 transport —— 有 command 走 stdio，有 url 走 http
-  if (typeof body.command === 'string' && body.command.trim() !== '') {
-    return normalizeKnown({ ...body, transport: 'stdio' })
-  }
-  if (typeof body.url === 'string' && body.url.trim() !== '') {
-    return normalizeKnown({ ...body, transport: 'streamable-http' })
-  }
-
-  throw new Error('mcp config needs either "transport", or "command" (stdio), or "url" (http)')
+  return [parseMcpInput(raw)]
 }
 
-function normalizeKnown(body: Record<string, unknown>): McpServerConfig {
-  const serverName = typeof body.serverName === 'string' && body.serverName.trim() !== ''
-    ? body.serverName.trim()
-    : typeof body.name === 'string' && body.name.trim() !== ''
-      ? body.name.trim()
-      : ''
-  if (!SERVER_NAME_PATTERN.test(serverName)) {
-    throw new Error(`serverName must match ${SERVER_NAME_PATTERN.toString()}`)
+/** 解析单条配置（表单字段或单个服务对象） */
+export function parseMcpInput(raw: unknown): McpServerConfig {
+  if (typeof raw !== 'object' || raw === null) throw new Error('mcp config must be an object')
+  const body = raw as Record<string, unknown>
+  const name = firstString(body.serverName, body.name)
+  if (name === undefined) {
+    throw new Error('mcp config needs a "serverName" (or wrap it as { "mcpServers": { "<name>": {...} } })')
   }
+  return normalizeServer(name, body)
+}
 
-  if (body.transport === 'stdio') {
+/** 从 transport / type / transportType 推断，都没有则按 command / url 兜底 */
+function inferTransport(body: Record<string, unknown>): 'stdio' | 'streamable-http' {
+  for (const key of ['transport', 'type', 'transportType']) {
+    const mapped = TRANSPORT_MAP[String(body[key] ?? '').trim().toLowerCase()]
+    if (mapped !== undefined) return mapped
+  }
+  if (typeof body.command === 'string' && body.command.trim() !== '') return 'stdio'
+  if (typeof body.url === 'string' && body.url.trim() !== '') return 'streamable-http'
+  throw new Error('mcp config needs either a transport/type, or "command" (stdio), or "url" (http)')
+}
+
+/** timeout 单位歧义：< 1000 视为秒（60 → 60000ms），否则视为毫秒 */
+function toTimeoutMs(raw: unknown): number | undefined {
+  if (typeof raw === 'number' && Number.isFinite(raw) && raw > 0) {
+    return raw < 1000 ? raw * 1000 : raw
+  }
+  return undefined
+}
+
+function normalizeServer(rawName: string, body: Record<string, unknown>): McpServerConfig {
+  const serverName = rawName.trim()
+  if (!SERVER_NAME_PATTERN.test(serverName)) {
+    throw new Error(`serverName "${serverName}" must match ${SERVER_NAME_PATTERN.toString()}`)
+  }
+  const transport = inferTransport(body)
+  const timeoutMs = toTimeoutMs(body.timeout)
+
+  if (transport === 'stdio') {
     const command = typeof body.command === 'string' ? body.command.trim() : ''
     if (command === '') throw new Error('stdio transport requires "command"')
     return {
@@ -104,6 +162,7 @@ function normalizeKnown(body: Record<string, unknown>): McpServerConfig {
       args: toStringArray(body.args),
       env: toStringMap(body.env),
       ...(typeof body.cwd === 'string' && body.cwd !== '' ? { cwd: body.cwd } : {}),
+      ...(timeoutMs !== undefined ? { toolCallTimeoutMs: timeoutMs } : {}),
     }
   }
 
@@ -114,7 +173,15 @@ function normalizeKnown(body: Record<string, unknown>): McpServerConfig {
     serverName,
     url,
     headers: toStringMap(body.headers),
+    ...(timeoutMs !== undefined ? { toolCallTimeoutMs: timeoutMs } : {}),
   }
+}
+
+function firstString(...values: unknown[]): string | undefined {
+  for (const value of values) {
+    if (typeof value === 'string' && value.trim() !== '') return value.trim()
+  }
+  return undefined
 }
 
 function toStringArray(raw: unknown): string[] {
@@ -136,6 +203,11 @@ function serversFilePath(): string {
   const home = process.env.DSH_HOME ?? ''
   if (home === '') throw new Error('DSH_HOME is not set')
   return join(home, 'mcp', 'servers.json')
+}
+
+/** 读取全部已配置服务（供宿主启动时装载） */
+export async function readMcpServers(): Promise<McpServerRecord[]> {
+  return (await readStore()).servers
 }
 
 async function readStore(): Promise<McpStoreFile> {
@@ -165,47 +237,74 @@ async function writeStore(store: McpStoreFile): Promise<void> {
 export class McpService {
   constructor(private readonly ctx: Context) {}
 
-  /** 列出已配置的服务（含从全局工具注册表推断的连接状态与工具数） */
-  async list(): Promise<Array<McpServerRecord & { health: string; toolCount: number; error: string }>> {
+  /**
+   * 列出已配置的服务。
+   *
+   * `status` 是装载方（ChatBots）维护的实时连接状态；没提供的服务（比如
+   * 还没轮到装载）退回按工具数推断，保持旧行为。
+   */
+  async list(status?: ReadonlyMap<string, McpStatus>): Promise<McpServerView[]> {
     const store = await readStore()
     const schemas = this.ctx.tools.schemas()
     return store.servers.map((server) => {
       const prefix = `mcp__${server.serverName}__`
       const tools = schemas.filter(schema => schema.name.startsWith(prefix))
+      const live = status?.get(server.serverName)
       return {
         ...server,
         // 前端列表按 `name` 显示。serverName 永远存在（parseMcpInput 已
         // 校验），没有它就是历史脏数据 —— 用 serverName 兜底，绝不让
         // `undefined` 漏到 UI。
         name: server.serverName,
-        health: tools.length > 0 ? 'connected' : 'disconnected',
+        health: live ?? (tools.length > 0 ? 'connected' : 'disconnected'),
         toolCount: tools.length,
         error: '',
       }
     })
   }
 
-  /** 新增（body 可为表单字段或整体 JSON config） */
-  async add(raw: unknown): Promise<McpServerRecord> {
-    const config = parseMcpInput(raw)
+  /**
+   * 新增。
+   *
+   * body 可为：① 单个服务对象 / 表单字段；② `{ mcpServers: { name: cfg } }`
+   * 字典（一次导入多个，重名或非法条目跳过，全部失败才报错）。
+   */
+  async add(raw: unknown): Promise<{ added: McpServerRecord[]; skipped: string[] }> {
+    const configs = parseMcpInputs(raw)
     const store = await readStore()
-    if (store.servers.some(s => s.serverName === config.serverName)) {
-      throw new Error(`serverName "${config.serverName}" already exists`)
-    }
     const now = Date.now()
-    const record: McpServerRecord = {
-      ...config,
-      id: `mcp-${config.serverName}`,
-      createdAt: now,
-      updatedAt: now,
+    const added: McpServerRecord[] = []
+    const skipped: string[] = []
+
+    for (const config of configs) {
+      if (store.servers.some(s => s.serverName === config.serverName)) {
+        skipped.push(`${config.serverName} (already exists)`)
+        continue
+      }
+      const record: McpServerRecord = {
+        ...config,
+        id: `mcp-${config.serverName}`,
+        createdAt: now,
+        updatedAt: now,
+      }
+      store.servers.push(record)
+      added.push(record)
     }
-    store.servers.push(record)
+
+    if (added.length === 0) throw new Error(`nothing to add: ${skipped.join('; ')}`)
+    // 只落盘配置；插件实例由 ChatBots 在运行时 ctx.plugin() 装载（见其
+    // mountMcpServer），所以这里不再写任何 patch 文件。
     await writeStore(store)
-    await this.syncPlugins(store)
-    return record
+    return { added, skipped }
   }
 
-  /** 更新 */
+  /**
+   * 更新。
+   *
+   * serverName 是身份标识（工具命名空间 `mcp__<name>__` 的来源），编辑时
+   * **固定不变**：一旦允许改，好友配置里已勾选的 enabledMcpServers 引用会
+   * 全部失效。前端在编辑面板里把它标为只读。
+   */
   async update(id: string, raw: unknown): Promise<McpServerRecord> {
     const config = parseMcpInput(raw)
     const store = await readStore()
@@ -213,68 +312,53 @@ export class McpService {
     if (index === -1) throw new Error(`mcp server "${id}" not found`)
     const previous = store.servers[index]
     const now = Date.now()
+    const serverName = previous?.serverName ?? config.serverName
     const record: McpServerRecord = {
       ...config,
-      id: previous?.id ?? `mcp-${config.serverName}`,
+      serverName,
+      id: previous?.id ?? `mcp-${serverName}`,
       createdAt: previous?.createdAt ?? now,
       updatedAt: now,
     }
     store.servers[index] = record
     await writeStore(store)
-    await this.syncPlugins(store)
     return record
   }
 
-  /** 删除 */
-  async remove(id: string): Promise<void> {
+  /** 删除；返回被删服务的 serverName 供调用方卸载实例 */
+  async remove(id: string): Promise<string> {
     const store = await readStore()
+    const target = store.servers.find(s => s.id === id)
+    if (target === undefined) throw new Error(`mcp server "${id}" not found`)
     const next = store.servers.filter(s => s.id !== id)
-    if (next.length === store.servers.length) throw new Error(`mcp server "${id}" not found`)
     await writeStore({ servers: next })
-    await this.syncPlugins({ servers: next })
+    return target.serverName
   }
 
   /**
-   * 连接测试：直接用 stdio/http 客户端拉一次工具列表，不经过插件实例。
-   * 复用 mcp-client 包的连接原语成本较高（需要构造完整 Cordis 上下文），
-   * 这里只做一次轻量握手探测。
+   * 连接探测：查该服务当前已注册的工具。
+   *
+   * 注意这不是"发起一次新握手"——那需要重建完整客户端实例。这里读的是
+   * 全局工具注册表的快照，反映的是插件当前的连接状态：
+   *   ok        → 已连上并注册了工具
+   *   no_tools  → 一个工具都没有（可能还在启动/重连，也可能这个服务
+   *               本身就不暴露工具）；文案交给前端本地化，后端不写死英文
    */
-  async test(id: string): Promise<{ ok: boolean; tools: Array<{ name: string; description?: string }>; error: string }> {
+  async test(id: string): Promise<{
+    ok: boolean
+    code: 'ok' | 'no_tools'
+    tools: Array<{ name: string; description?: string }>
+    error: string
+  }> {
     const store = await readStore()
     const server = store.servers.find(s => s.id === id)
     if (server === undefined) throw new Error(`mcp server "${id}" not found`)
-    // 轻量探测：检查全局工具注册表中是否已有该服务的工具
     const prefix = `mcp__${server.serverName}__`
     const tools = this.ctx.tools.schemas()
       .filter(schema => schema.name.startsWith(prefix))
       .map(schema => ({ name: schema.name, description: schema.description }))
-    return { ok: tools.length > 0, tools, error: tools.length > 0 ? '' : 'no tools registered (server may need a restart to connect)' }
-  }
-
-  /**
-   * 把 servers.json 同步成 profile 的 mcp 插件实例。
-   *
-   * dsh 的插件树来自 cordis.patch.yml + profile package.json，运行时不能
-   * 直接增删插件；这里把配置写进 `$DSH_HOME/profiles/chat-agent/cordis.mcp.yml`
-   * （由 loader 在启动时读取的补充 patch），并提示需要重启宿主生效。
-   */
-  private async syncPlugins(store: McpStoreFile): Promise<void> {
-    const dshHome = process.env.DSH_HOME ?? ''
-    if (dshHome === '') return
-    const lines: string[] = ['# Managed by DeepChat MCP panel — do not edit by hand.']
-    for (const server of store.servers) {
-      const config = server.transport === 'stdio'
-        ? `{"transport":"stdio","serverName":${JSON.stringify(server.serverName)},"command":${JSON.stringify(server.command)},"args":${JSON.stringify(server.args)},"env":${JSON.stringify(server.env)}}`
-        : `{"transport":"streamable-http","serverName":${JSON.stringify(server.serverName)},"url":${JSON.stringify(server.url)},"headers":${JSON.stringify(server.headers)}}`
-      lines.push(`- id: mcp-${server.serverName}`)
-      lines.push('  name: \'@deepseek-ai/dsh-mcp-client\'')
-      lines.push(`  config: ${config}`)
-    }
-    // 空列表也保持合法 YAML（顶层 []）：只有注释的文件会被 YAML 解析成
-    // null，loader 的 parsePatchList 直接拒绝启动 —— 这正是踩过的坑。
-    if (store.servers.length === 0) lines.push('[]')
-    const file = join(dshHome, 'profiles', 'chat-agent', 'cordis.mcp.yml')
-    await mkdir(dirname(file), { recursive: true })
-    await writeFile(file, `${lines.join('\n')}\n`, 'utf8')
+    return tools.length > 0
+      ? { ok: true, code: 'ok', tools, error: '' }
+      : { ok: false, code: 'no_tools', tools: [], error: '' }
   }
 }

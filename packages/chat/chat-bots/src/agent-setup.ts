@@ -191,6 +191,18 @@ export function buildBotAgentSetup(
   const allowedSkills = new Set(skillSummaries.map(skill => skill.name))
   const memoryText = memory.trim()
 
+  /**
+   * 已启用 MCP 服务的工具命名空间前缀。
+   *
+   * `enabledMcpServers` 存的是服务 id（`mcp-<serverName>`），而工具注册名是
+   * `mcp__<serverName>__<tool>`，所以这里取 id 去掉 `mcp-` 前缀后拼成前缀。
+   * 列表为空表示不限制 MCP（旧行为：全部可用）。
+   */
+  const mcpPrefixes = (bot.enabledMcpServers ?? []).map((id) => {
+    const serverName = id.startsWith('mcp-') ? id.slice('mcp-'.length) : id
+    return `mcp__${serverName}__`
+  })
+
   return (agentCtx: Context): void => {
     agentCtx.systemPrompt.section({
       name: 'chat:persona',
@@ -265,11 +277,19 @@ export function buildBotAgentSetup(
     // 工具白名单：restrict 过滤该 agent 继承的全局工具面（未列入的工具
     // schema 不会发给模型）；本层注册的 `skill` 工具不受影响。名单为空 =
     // 全部可用（旧版语义）。
+    //
+    // 已启用的 MCP 工具必须一起放行：否则它们会被 restrict 过滤掉，
+    // 好友编辑里勾了 MCP 也等于没勾。名单里存的是具体工具名，而 MCP
+    // 工具是在服务连上之后才注册进来的（启动时可能还没注册），所以按
+    // 命名空间前缀匹配，而不是逐个比对名字。
     if (enabledTools.length > 0) {
-      const known = new Set(ctx.tools.schemas().map(schema => schema.name))
-      const allow = enabledTools.filter(name => known.has(name))
+      const allow = ctx.tools.schemas()
+        .map(schema => schema.name)
+        .filter(name =>
+          enabledTools.includes(name) || mcpPrefixes.some(prefix => name.startsWith(prefix)))
       if (allow.length > 0) agentCtx.tools.restrict({ allow })
     }
+    // 名单为空 → 不 restrict，保持「全部可用」的旧版语义（MCP 工具自然可用）
 
     // 技能：目录进提示词，正文经 scoped `skill` 工具按需加载（旧版
     // createSkillTool + formatSkillsForPrompt 语义）。

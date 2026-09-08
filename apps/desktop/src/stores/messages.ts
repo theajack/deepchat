@@ -209,6 +209,15 @@ export const useMessagesStore = defineStore('messages', () => {
     segmentsCache.value = sc
   }
 
+  /**
+   * 「请滚动到底部」信号：每次自增，附带会话 id。
+   * 视图 watch 它并强制滚到底（区别于常规的贴底才滚）。
+   */
+  const scrollSignal = ref<{ seq: number; conversationId: string }>({ seq: 0, conversationId: '' })
+  function requestScrollBottom(conversationId: string) {
+    scrollSignal.value = { seq: scrollSignal.value.seq + 1, conversationId }
+  }
+
   async function send(
     conversationId: string,
     content: string,
@@ -257,6 +266,10 @@ export const useMessagesStore = defineStore('messages', () => {
         },
       }
     }
+
+    // 发出消息后通知视图立刻贴底：用户可能在翻历史（stickToBottom=false），
+    // 但"我刚发了一条"必然想看到自己这条，所以要强制拉到底部。
+    requestScrollBottom(conversationId)
 
     const ack = await chatApi.sendMessage(conversationId, content, images, attachments)
     // 用服务端返回的真实 promptSeq 校正占位（群聊没有该字段则保持估算值）
@@ -579,6 +592,10 @@ export const useMessagesStore = defineStore('messages', () => {
         case 'message.created': {
           const msg = frame.data as Message
           append(msg)
+          // 会话不在前台时累加未读（自己发的消息不算）。
+          // 用户描述的是"历史对话消息输出完成"——即切到别的会话后，
+          // 后台会话的 AI 回复完成，这时列表要有未读气泡。
+          if (msg.is_self === 0) useConversationsStore().bumpUnread(msg.conversation_id)
           // 清理该回复对应的草稿与 loading 占位。
           // 注意：只清理"本条"（同 promptSeq / 同 draftId），不能像以前那样
           // 清掉同会话所有草稿 —— 连发多条时，第一条完成会把后面几条消息
@@ -711,6 +728,6 @@ export const useMessagesStore = defineStore('messages', () => {
   return {
     byConv, streams, typing, toolCalls, getToolCalls, getSegments,
     load, loadMore, send, stopGeneration, bindEvents, cleanupDrafts, clearLocal,
-    locate, requestLocate, hasMoreByConv, loadingMore, scheduling, consolidating,
+    locate, requestLocate, hasMoreByConv, loadingMore, scheduling, consolidating, scrollSignal,
   }
 })

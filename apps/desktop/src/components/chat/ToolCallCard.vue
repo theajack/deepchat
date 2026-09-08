@@ -163,14 +163,15 @@ watch(
       @click="onToggle"
     >
       <Wrench :size="14" class="shrink-0 text-accent" :stroke-width="2" />
-      <span class="text-[12.5px] font-medium text-hi">{{ name || t("tool.unknown") }}</span>
-      <span class="font-num text-[10px] text-lo">
+      <!-- 名称占满剩余空间自行换行；状态/耗时 shrink-0 + nowrap，绝不被挤压折行 -->
+      <span class="min-w-0 flex-1 break-all text-[12.5px] font-medium leading-snug text-hi">{{ name || t("tool.unknown") }}</span>
+      <span class="shrink-0 whitespace-nowrap font-num text-[10px] text-lo">
         {{ status === "running" ? t("tool.running") : status === "error" ? t("tool.failed") : t("tool.done") }}
       </span>
-      <span v-if="durationText" class="font-num text-[10px] text-lo/70">· {{ durationText }}</span>
-      <span v-if="status === 'running'" class="text-accent"><Loader2 :size="13" class="animate-spin" /></span>
-      <CheckCircle2 v-else-if="status === 'success'" :size="13" class="text-emerald-400" />
-      <XCircle v-else-if="status === 'error'" :size="13" class="text-red-400" />
+      <span v-if="durationText" class="shrink-0 whitespace-nowrap font-num text-[10px] text-lo/70">· {{ durationText }}</span>
+      <span v-if="status === 'running'" class="shrink-0 text-accent"><Loader2 :size="13" class="animate-spin" /></span>
+      <CheckCircle2 v-else-if="status === 'success'" :size="13" class="shrink-0 text-emerald-400" />
+      <XCircle v-else-if="status === 'error'" :size="13" class="shrink-0 text-red-400" />
       <ChevronDown
         v-if="expandable"
         :size="13"

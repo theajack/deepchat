@@ -11,6 +11,7 @@ import { spawn } from 'node:child_process'
 import { access, cp, mkdir, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { IncomingMessage, ServerResponse } from 'node:http'
+import type { McpServerRecord, McpStatus } from './mcp.ts'
 import type { Context } from '@deepseek-ai/cordis'
 import { Service } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
@@ -939,6 +940,117 @@ export class ChatBots extends Service {
     })
   }
 
+  // ── MCP 客户端实例（运行时热插拔）──────────────────────────────────
+
+  /**
+   * 已装载的 mcp-client 实例（serverName → fiber handle）。
+   *
+   * 为什么在运行时装载而不是写 patch 文件：cordis 的 overlay patch
+   * （cordis.patch.yml / cordis.mcp.yml）只能**修改** bundle 层已存在的
+   * 条目，无法新增插件 —— 写进去启动时会报
+   * `patch: entry "mcp-xxx" not found`，插件根本不进插件树，工具自然一个
+   * 都注册不上。改为 ctx.plugin() 运行时装载后：添加/删除 MCP 立即生效，
+   * 且对打包版（没有 pnpm、bundle 只读）同样适用。
+   */
+  private mcpHandles = new Map<string, { dispose: () => Promise<void> }>()
+
+  /** 各 MCP 服务的实时连接状态（serverName → 状态），供 list 接口展示 */
+  private mcpStatus = new Map<string, McpStatus>()
+
+  /**
+   * 解析 mcp-client 插件模块。
+   *
+   * 优先用 dsh 维护的 flat 模块兜底目录（$DSH_HOME/profiles/node_modules，
+   * 每条一个软链），打包后 profile 自己的 node_modules 也试一次。
+   * 找不到就返回 undefined —— MCP 降级不可用，但不拖垮整个启动。
+   */
+  private async resolveMcpClient(): Promise<unknown> {
+    const { createRequire } = await import('node:module')
+    const { existsSync } = await import('node:fs')
+    const require = createRequire(`${process.cwd()}/noop.js`)
+    const home = process.env.DSH_HOME ?? ''
+    const candidates = [
+      join(home, 'profiles', 'node_modules', '@deepseek-ai', 'dsh-mcp-client'),
+      join(home, 'profiles', 'chat-agent', 'node_modules', '@deepseek-ai', 'dsh-mcp-client'),
+      '@deepseek-ai/dsh-mcp-client',
+    ]
+    for (const candidate of candidates) {
+      if (!candidate.startsWith('@') && !existsSync(candidate)) continue
+      try {
+        return require(candidate)
+      } catch {
+        // 换下一个候选位置
+      }
+    }
+    return undefined
+  }
+
+  /** 装载一个 MCP 服务（已装载则跳过） */
+  async mountMcpServer(server: McpServerRecord): Promise<void> {
+    if (this.mcpHandles.has(server.serverName)) return
+    const plugin = await this.resolveMcpClient()
+    if (plugin === undefined) {
+      this.ctx.logger.warn('chat-bots: mcp-client package not resolvable — MCP servers stay offline')
+      this.mcpStatus.set(server.serverName, 'error')
+      return
+    }
+    const timeout = server.toolCallTimeoutMs === undefined
+      ? {}
+      : { toolCallTimeoutMs: server.toolCallTimeoutMs }
+    const config = server.transport === 'stdio'
+      ? {
+        transport: 'stdio' as const,
+        serverName: server.serverName,
+        command: server.command,
+        args: server.args,
+        env: server.env,
+        ...(server.cwd === undefined ? {} : { cwd: server.cwd }),
+        ...timeout,
+      }
+      : {
+        transport: 'streamable-http' as const,
+        serverName: server.serverName,
+        url: server.url,
+        headers: server.headers,
+        ...timeout,
+      }
+    // 先标 connecting：插件激活要握手 + 拉工具列表，stdio 服务可能要好几秒。
+    // 前端据此显示 loading，激活完成后再翻成 connected。
+    this.mcpStatus.set(server.serverName, 'connecting')
+    try {
+      const handle = this.ctx.plugin(plugin as never, config as never)
+      this.mcpHandles.set(server.serverName, handle)
+      void Promise.resolve(handle).then(
+        () => { this.mcpStatus.set(server.serverName, 'connected') },
+        () => { this.mcpStatus.set(server.serverName, 'error') },
+      )
+    } catch (error: unknown) {
+      this.mcpStatus.set(server.serverName, 'error')
+      this.ctx.logger.warn('chat-bots: failed to mount MCP "%s": %o', server.serverName, error)
+    }
+  }
+
+  /** 卸载一个 MCP 服务 */
+  async unmountMcpServer(serverName: string): Promise<void> {
+    const handle = this.mcpHandles.get(serverName)
+    if (handle === undefined) return
+    this.mcpHandles.delete(serverName)
+    this.mcpStatus.delete(serverName)
+    try {
+      await handle.dispose()
+    } catch (error: unknown) {
+      this.ctx.logger.warn('chat-bots: failed to unmount MCP "%s": %o', serverName, error)
+    }
+  }
+
+  /** 启动时装载全部已配置服务 */
+  async mountAllMcpServers(): Promise<void> {
+    const { readMcpServers } = await import('./mcp.ts')
+    for (const server of await readMcpServers()) {
+      await this.mountMcpServer(server)
+    }
+  }
+
   /**
    * Resolves once the bot's in-flight memory consolidation (if any) has landed.
    *
@@ -1689,7 +1801,7 @@ export class ChatBots extends Service {
             if (req.method !== 'GET') return json(res, 405, { error: 'method not allowed' })
             const { McpService } = await import('./mcp.ts')
             const service = new McpService(this.ctx)
-            return json(res, 200, { items: await service.list() })
+            return json(res, 200, { items: await service.list(this.mcpStatus) })
           }
 
           // POST /chatapi/mcp — 新增（支持整体 JSON：serverName + transport 配置）
@@ -1697,8 +1809,10 @@ export class ChatBots extends Service {
             const body = await readBody(req)
             const { McpService } = await import('./mcp.ts')
             const service = new McpService(this.ctx)
-            const record = await service.add(body)
-            return json(res, 200, record)
+            const { added, skipped } = await service.add(body)
+            // 立即装载，无需重启宿主
+            for (const record of added) await this.mountMcpServer(record)
+            return json(res, 200, { added, skipped })
           }
 
           const id = decodeURIComponent(rawId)
@@ -1712,12 +1826,17 @@ export class ChatBots extends Service {
           }
 
           if (req.method === 'DELETE') {
-            await service.remove(id)
+            const serverName = await service.remove(id)
+            await this.unmountMcpServer(serverName)
             return json(res, 200, { removed: true })
           }
           if (req.method === 'PUT') {
             const body = await readBody(req)
-            return json(res, 200, await service.update(id, body))
+            const record = await service.update(id, body)
+            // 配置变了：卸载旧实例再按新配置装载
+            await this.unmountMcpServer(record.serverName)
+            await this.mountMcpServer(record)
+            return json(res, 200, record)
           }
           return json(res, 405, { error: 'method not allowed' })
         } catch (error: unknown) {
@@ -2024,5 +2143,11 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   // `chatBots` is injectable. Without this, `chat-group` (which injects
   // `chatBots`) can be observed as pending by the boot audit while this
   // service's async init is still in flight, failing the whole boot.
-  await ctx.plugin(ChatBots, config).await()
+  const handle = ctx.plugin(ChatBots, config)
+  await handle.await()
+  // 装载已配置的 MCP 服务（运行时 ctx.plugin，不经过 patch 文件）。
+  // 不 await 进激活链：单个 MCP 连不上不该拖垮启动，失败会自动重连。
+  void ctx.inject(['chatBots'], async (c: Context) => {
+    await (c.chatBots as ChatBots).mountAllMcpServers()
+  })
 }
