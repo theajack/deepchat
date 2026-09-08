@@ -174,6 +174,10 @@ export class McpService {
       const tools = schemas.filter(schema => schema.name.startsWith(prefix))
       return {
         ...server,
+        // 前端列表按 `name` 显示。serverName 永远存在（parseMcpInput 已
+        // 校验），没有它就是历史脏数据 —— 用 serverName 兜底，绝不让
+        // `undefined` 漏到 UI。
+        name: server.serverName,
         health: tools.length > 0 ? 'connected' : 'disconnected',
         toolCount: tools.length,
         error: '',

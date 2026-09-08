@@ -67,6 +67,7 @@ export interface SkillInstallResult {
 
 export interface McpServerInfo {
   id: string
+  /** 显示用：等于 serverName，UI 唯一标识 */
   name: string
   transport: string
   enabled: boolean
