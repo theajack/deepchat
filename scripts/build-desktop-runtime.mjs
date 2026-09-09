@@ -11,7 +11,7 @@
 // Windows 分支在这里实现同一套产物，因为打包机上不保证有 bash。
 
 import { execFileSync } from 'node:child_process'
-import { cpSync, existsSync, mkdirSync, readdirSync, realpathSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
+import { cpSync, existsSync, mkdirSync, readdirSync, realpathSync, renameSync, rmSync, unlinkSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -121,7 +121,26 @@ function materializeSymlinks() {
   console.log(`==> materialized symlinks: ${String(total)}`)
 }
 
+/**
+ * 内置技能：仓库 .agents/skills 复制到 resources/dsh/skills，
+ * lib.rs 检测到后通过 DSH_BUNDLED_SKILL_DIR 注册（source=bundled，受信）。
+ * 与 build-desktop-runtime.sh 的同名逻辑保持一致。
+ */
+function stageSkills() {
+  const skillDir = join(stage, 'skills')
+  const source = join(repoRoot, '.agents', 'skills')
+  if (!existsSync(source)) {
+    console.log('==> no .agents/skills in repo, skipping bundled skills')
+    return
+  }
+  rmSync(skillDir, { recursive: true, force: true })
+  mkdirSync(skillDir, { recursive: true })
+  cpSync(source, skillDir, { recursive: true })
+  console.log(`==> bundled skills: ${String(readdirSync(skillDir).length)} entries`)
+}
+
 await stageNode()
 deployRuntime()
 materializeSymlinks()
+stageSkills()
 console.log(`==> runtime staged at ${stage}`)

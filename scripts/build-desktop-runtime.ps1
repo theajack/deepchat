@@ -58,4 +58,19 @@ if ($LASTEXITCODE -ne 0) { throw "build-desktop-runtime: pnpm deploy failed with
 #    实体化后可能又带出新的软链，所以反复扫到没有可处理的链接为止。
 node -e 'const fs=require(`fs`),path=require(`path`);const root=process.argv[1];const isBin=p=>p.includes(`${path.sep}.bin${path.sep}`);let total=0;for(let pass=0;pass<10;pass++){const links=[];(function walk(dir){for(const e of fs.readdirSync(dir,{withFileTypes:true})){const p=path.join(dir,e.name);if(e.isSymbolicLink())links.push(p);else if(e.isDirectory())walk(p)}})(root);const pending=links.filter(p=>!isBin(p));if(pending.length===0)break;for(const link of pending){let t;try{t=fs.realpathSync(link)}catch{continue}fs.rmSync(link);fs.cpSync(t,link,{recursive:true,dereference:true});total++}}console.log(`==> materialized symlinks: ${total}`)' (Join-Path $RuntimeDir 'node_modules')
 
+# 4) 内置技能：仓库 .agents/skills 复制到 resources/dsh/skills，
+#    lib.rs 检测到后通过 DSH_BUNDLED_SKILL_DIR 注册（source=bundled，受信）。
+$SkillDir = Join-Path $Stage 'skills'
+$SkillSource = Join-Path $RepoRoot '.agents/skills'
+if (Test-Path $SkillSource) {
+  if (Test-Path $SkillDir) { Remove-Item $SkillDir -Recurse -Force }
+  New-Item -ItemType Directory -Force -Path $SkillDir | Out-Null
+  Copy-Item -Path (Join-Path $SkillSource '*') -Destination $SkillDir -Recurse -Force
+  $count = (Get-ChildItem $SkillDir | Measure-Object).Count
+  Write-Host "==> bundled skills: $count entries"
+}
+else {
+  Write-Host '==> no .agents/skills in repo, skipping bundled skills'
+}
+
 Write-Host "==> runtime staged at $Stage"
