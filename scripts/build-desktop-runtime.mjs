@@ -11,7 +11,7 @@
 // Windows 分支在这里实现同一套产物，因为打包机上不保证有 bash。
 
 import { execFileSync } from 'node:child_process'
-import { cpSync, existsSync, mkdirSync, readdirSync, realpathSync, renameSync, rmSync, unlinkSync, writeFileSync } from 'node:fs'
+import { cpSync, existsSync, mkdirSync, readdirSync, realpathSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -122,8 +122,9 @@ function materializeSymlinks() {
 }
 
 /**
- * 内置技能：仓库 .agents/skills 复制到 resources/dsh/skills，
- * lib.rs 检测到后通过 DSH_BUNDLED_SKILL_DIR 注册（source=bundled，受信）。
+ * 内置技能随包分发：仓库 .agents/skills 在 dev 模式下靠「cwd=仓库被当作项目根」
+ * 被扫到，打包后 cwd 是 DSH_HOME，全新机器上没有任何技能来源。随包分发一份，
+ * 宿主通过 DSH_BUNDLED_SKILL_DIR 注册（source=bundled，受信）。
  * 与 build-desktop-runtime.sh 的同名逻辑保持一致。
  */
 function stageSkills() {
@@ -133,9 +134,20 @@ function stageSkills() {
     console.log('==> no .agents/skills in repo, skipping bundled skills')
     return
   }
-  rmSync(skillDir, { recursive: true, force: true })
-  mkdirSync(skillDir, { recursive: true })
-  cpSync(source, skillDir, { recursive: true })
+  if (existsSync(skillDir)) {
+    // 旧产物移出 resources 树（同盘重命名到 target，不参与打包）
+    const retired = join(
+      repoRoot,
+      'apps',
+      'desktop',
+      'src-tauri',
+      'target',
+      `deepchat-skills-old-${Date.now()}`,
+    )
+    mkdirSync(retired, { recursive: true })
+    renameSync(skillDir, join(retired, 'skills'))
+  }
+  cpSync(source, skillDir, { recursive: true, dereference: true })
   console.log(`==> bundled skills: ${String(readdirSync(skillDir).length)} entries`)
 }
 
