@@ -388,10 +388,11 @@ async function save() {
     <template #footer>
       <button class="rounded-lg border border-line-strong/50 px-4 py-2 text-[13px] text-mid transition-all hover:bg-ink-3 hover:text-hi"
         @click="emit('cancel')">{{ t("common.cancel") }}</button>
-      <button v-if="isEdit" class="rounded-lg bg-gradient-to-br from-accent to-accent-deep px-4 py-2 text-[13px] font-semibold text-on-accent shadow-[0_4px_18px_rgba(42,227,164,0.28)] transition-all hover:shadow-[0_4px_24px_var(--color-accent-glow)] hover:brightness-110 active:scale-95 disabled:opacity-40 disabled:shadow-none"
-        :disabled="!canSubmit" @click="save">{{ t("common.save") }}</button>
-      <button v-else class="rounded-lg bg-gradient-to-br from-accent to-accent-deep px-4 py-2 text-[13px] font-semibold text-on-accent shadow-[0_4px_18px_rgba(42,227,164,0.28)] transition-all hover:shadow-[0_4px_24px_var(--color-accent-glow)] hover:brightness-110 active:scale-95 disabled:opacity-40 disabled:shadow-none"
-        :disabled="!canSubmit" @click="create">{{ t("group.create") }}</button>
+      <!-- 不再 disabled 灰显：点击时校验并 toast 具体原因，用户才知道差什么 -->
+      <button v-if="isEdit" class="rounded-lg bg-gradient-to-br from-accent to-accent-deep px-4 py-2 text-[13px] font-semibold text-on-accent shadow-[0_4px_18px_rgba(42,227,164,0.28)] transition-all hover:shadow-[0_4px_24px_var(--color-accent-glow)] hover:brightness-110 active:scale-95"
+        @click="save">{{ t("common.save") }}</button>
+      <button v-else class="rounded-lg bg-gradient-to-br from-accent to-accent-deep px-4 py-2 text-[13px] font-semibold text-on-accent shadow-[0_4px_18px_rgba(42,227,164,0.28)] transition-all hover:shadow-[0_4px_24px_var(--color-accent-glow)] hover:brightness-110 active:scale-95"
+        @click="create">{{ t("group.create") }}</button>
     </template>
   </Modal>
 </template>
