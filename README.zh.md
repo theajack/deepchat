@@ -12,6 +12,22 @@
     </a>
 </p>
 
+<p align="center">
+    <a href="https://github.com/theajack/deepchat/releases" target="_black">
+        <img src="https://img.shields.io/badge/Download-%20github%20-7289da.svg" alt="author" />
+    </a>
+    <a href="https://my.feishu.cn/wiki/LbpkwodnsiFHJVkEndBc9VZknmb" target="_black">
+        <img src="https://img.shields.io/badge/Download-%20飞书文档%20-7289da.svg" alt="author" />
+    </a>
+    <a href="https://github.com/theajack/deepchat/blob/master/README.md" target="_black">
+        <img src="https://img.shields.io/badge/Docs-%20English%20-7289da.svg" alt="author" />
+    </a>
+    <a href="https://www.github.com/theajack/deepchat/stargazers" target="_black">
+        <img src="https://img.shields.io/github/stars/theajack/deepchat?logo=github" alt="stars" />
+    </a>
+    <img src="https://shiyix.cn/api2/util/badge/stat?c=Visitors-deepchat" alt="visitors">
+</p>
+
 ---
 
 ## 这是什么
@@ -23,6 +39,8 @@
 - **UI 沿用原 chat-agent** —— Tauri 2 + Vue 3，通信层从 stdin/stdout 换成 HTTP + SSE
 
 > 上游框架的文档完整保留在 [`docs/`](docs/)（219 篇）中。本文件描述本项目自身，英文版见 [`README.md`](README.md)。
+
+![](./website/DeepChat.jpg)
 
 ## 如何启动
 
@@ -37,7 +55,6 @@
 桌面端通过 `node apps/cli/lib/bin.js --profile chat-agent` 拉起后端宿主，因此**必须先构建内核**，否则启动时会报「无法定位 dsh」。
 
 ```bash
-cd deepseek-harness
 pnpm install --ignore-scripts
 pnpm run build          # 构建 host + client，产出 apps/cli/lib/
 ```

@@ -12,6 +12,22 @@ Create multiple AI companions, each with its own persona, skills and tool permis
     </a>
 </p>
 
+<p align="center">
+    <a href="https://github.com/theajack/deepchat/releases" target="_black">
+        <img src="https://img.shields.io/badge/Download-%20github%20-7289da.svg" alt="author" />
+    </a>
+    <a href="https://my.feishu.cn/wiki/LbpkwodnsiFHJVkEndBc9VZknmb" target="_black">
+        <img src="https://img.shields.io/badge/Download-%20飞书文档%20-7289da.svg" alt="author" />
+    </a>
+    <a href="https://github.com/theajack/deepchat/blob/master/README.zh.md" target="_black">
+        <img src="https://img.shields.io/badge/Docs-%20中文%20-7289da.svg" alt="author" />
+    </a>
+    <a href="https://www.github.com/theajack/deepchat/stargazers" target="_black">
+        <img src="https://img.shields.io/github/stars/theajack/deepchat?logo=github" alt="stars" />
+    </a>
+    <img src="https://shiyix.cn/api2/util/badge/stat?c=Visitors-deepchat" alt="visitors">
+</p>
+
 ---
 
 ## What this is
@@ -20,9 +36,11 @@ The chat product is built as **plugins** on top of DeepSeek Harness:
 
 - **Runtime comes entirely from dsh** — agent loop, tool system, LLM adapters, session event log, HTTP/WS transport, Cordis plugin tree
 - **Chat business logic is ours** — AI companions, the group trigger engine, long-term memory, desktop UI
-- **UI carried over from the original chat-agent** — Tauri 2 + Vue 3, with the transport switched from stdin/stdout to HTTP + SSE
+- **Desktop UI** — Tauri 2 + Vue 3, talking to the backend over HTTP + SSE
 
 > The upstream framework docs are kept in full under [`docs/`](docs/) (219 pages). This file describes this project itself; the Chinese version lives in [`README.zh.md`](README.zh.md).
+
+![](./website/DeepChat.jpg)
 
 ## Getting started
 
@@ -37,7 +55,6 @@ The chat product is built as **plugins** on top of DeepSeek Harness:
 The desktop app launches the backend host via `node apps/cli/lib/bin.js --profile chat-agent`, so the core **must be built first** — otherwise startup fails with "unable to locate dsh".
 
 ```bash
-cd deepseek-harness
 pnpm install --ignore-scripts
 pnpm run build          # builds host + client, emits apps/cli/lib/
 ```
@@ -167,7 +184,7 @@ deepseek-harness/
 │   │   └── chat-agent/     #   bundle composition layer
 │   └── ...                 # the rest of dsh
 ├── .dsh-home/              # dev-mode DSH_HOME (gitignored)
-├── chat-agent-context/     # migration and design docs
+├── chat-agent-context/     # design docs
 └── docs/                   # upstream dsh docs
 ```
 
@@ -210,11 +227,11 @@ Sessions are an **append-only event log**. What you see as messages is a project
 
 ## Documentation index
 
-Migration background, plugin responsibilities, event bridging and storage design are documented under [`chat-agent-context/`](chat-agent-context/):
+Plugin responsibilities, event bridging and storage design are documented under [`chat-agent-context/`](chat-agent-context/):
 
 | File | Contents |
 |---|---|
-| `00-overview.md` | Project overview and migration background |
+| `00-overview.md` | Project overview |
 | `01-backend-plugins.md` | Responsibilities and endpoints of the three chat plugins |
 | `02-event-bridge.md` | Translating session events into frontend events |
 | `03-workspace-sandbox.md` | Workspaces and sandboxing |
