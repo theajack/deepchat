@@ -28,6 +28,18 @@ export interface GroupRecord {
    * are anchored to it, so repointing later would orphan them.
    */
   readonly workspaceDir?: string | undefined
+  /**
+   * 自主对话疲劳阈值：连续无用户参与的 AI 对话轮数超过该值后，没有明确
+   * 指向（未被 @）的回复会越来越难被触发，防止成员之间无限互相接话。
+   * 缺省 5；用户在群里的每次发言都会重置计数。
+   */
+  readonly aiFatigueRounds?: number | undefined
+  /**
+   * 当用户 @ 某位成员时，其他未被 @ 的成员是否也回复该消息。
+   * 缺省（undefined/false）= 不回复：被 @ 的成员直接答，跳过调度者；
+   * true = 走正常调度，其他成员也可能插话。
+   */
+  readonly mentionOthersReply?: boolean | undefined
   readonly createdAt: number
   readonly updatedAt: number
 }
@@ -41,6 +53,10 @@ export type GroupCreateInput = Pick<GroupRecord, 'name'> & {
    * `$DSH_HOME/workspace/groups/{uid}`.
    */
   readonly workspaceDir?: string | undefined
+  /** 自主对话疲劳阈值（见 {@link GroupRecord.aiFatigueRounds}）。 */
+  readonly aiFatigueRounds?: number | undefined
+  /** @ 时其他成员是否也可回复（见 {@link GroupRecord.mentionOthersReply}）。 */
+  readonly mentionOthersReply?: boolean | undefined
 }
 
 /**
@@ -49,7 +65,7 @@ export type GroupCreateInput = Pick<GroupRecord, 'name'> & {
  * `workspaceDir` is deliberately absent — creation-time only, for the reason
  * documented on {@link GroupRecord.workspaceDir}.
  */
-export type GroupUpdatePatch = Partial<Pick<GroupRecord, 'name' | 'avatar' | 'memberBotIds'>>
+export type GroupUpdatePatch = Partial<Pick<GroupRecord, 'name' | 'avatar' | 'memberBotIds' | 'aiFatigueRounds' | 'mentionOthersReply'>>
 
 /** One rendered chat row served by `history()`. */
 export interface GroupMessageView {

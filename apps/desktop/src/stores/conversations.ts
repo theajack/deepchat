@@ -99,14 +99,20 @@ export const useConversationsStore = defineStore('conversations', () => {
     return conv
   }
 
-  /** @param workspaceDir 群聊共享工作目录；留空由后端分配默认目录（创建后不可改） */
+  /**
+   * @param workspaceDir 群聊共享工作目录；留空由后端分配默认目录（创建后不可改）
+   * @param aiFatigueRounds 自主对话疲劳阈值（默认 5，创建后可改）
+   * @param mentionOthersReply @某成员时其他成员是否也可回复（默认 false）
+   */
   async function createGroup(
     name: string,
     botIds: string[],
     introduction = '',
     workspaceDir?: string,
+    aiFatigueRounds?: number,
+    mentionOthersReply?: boolean,
   ): Promise<Conversation> {
-    const conv = await chatApi.createGroupConversation(name, botIds, introduction, workspaceDir)
+    const conv = await chatApi.createGroupConversation(name, botIds, introduction, workspaceDir, aiFatigueRounds, mentionOthersReply)
     upsert(conv)
     return conv
   }

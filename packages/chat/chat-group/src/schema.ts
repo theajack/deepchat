@@ -14,6 +14,8 @@ export const groupRecordSchema = z.object({
   memberBotIds: z.array(z.string()),
   sessionId: z.string().transform(SessionId),
   workspaceDir: z.string().optional(),
+  aiFatigueRounds: z.number().int().positive().optional(),
+  mentionOthersReply: z.boolean().optional(),
   createdAt: z.number().int().nonnegative(),
   updatedAt: z.number().int().nonnegative(),
 })

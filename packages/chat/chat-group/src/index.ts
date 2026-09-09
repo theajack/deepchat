@@ -73,6 +73,19 @@ export type { ScheduleCandidate, ScheduleRequest } from './scheduler.ts'
 export const name = 'chat-group'
 
 /**
+ * 自主对话疲劳默认阈值：连续无用户参与的 AI 对话轮数超过它后，未指向的
+ * 回复开始按轮衰减（群记录里的 `aiFatigueRounds` 可覆盖）。
+ */
+const DEFAULT_AI_FATIGUE_ROUNDS = 5
+
+/**
+ * 疲劳衰减基数：超出阈值第 N 轮时，每个未指向回复的保留概率为
+ * FATIGUE_KEEP_DECAY^N（0.6 → 超出 1 轮 60%，2 轮 36%，3 轮 ~22%…）。
+ * 被 @ 的成员不受此门限制。
+ */
+const FATIGUE_KEEP_DECAY = 0.6
+
+/**
  * Bot registry, agent registry, the LLM seam (the speaker scheduler calls it
  * directly), tool registry (`buildBotAgentSetup` reads `ctx.tools.schemas()`
  * for the per-bot tool whitelist — omitting it throws "cannot get property
@@ -209,6 +222,18 @@ export class ChatGroup extends Service {
    * between rounds, and cleared by the user's next message.
    */
   private readonly stopped = new Set<string>()
+
+  /**
+   * Consecutive AI-only rounds per group id — how long the members have been
+   * talking among themselves without the user.
+   *
+   * The fatigue gate reads it: past the group's `aiFatigueRounds` threshold,
+   * undirected replies decay per round (see {@link FATIGUE_KEEP_DECAY}).
+   * Every user message resets it (see {@link send}), and each cascade round
+   * whose latest message came from a bot — plus each idle-turn opener —
+   * increments it.
+   */
+  private readonly aiRoundStreak = new Map<string, number>()
 
   constructor(ctx: Context, private readonly config: Config) {
     super(ctx, 'chatGroup')
@@ -359,6 +384,12 @@ export class ChatGroup extends Service {
           botId: bot.id,
           botName: bot.name,
           emitFinal: false,
+          // 群聊成员的草稿 id 加 bot 前缀：不同成员同 promptSeq 的流式
+          // （各自 session 都从 0 计）不会挤进同一个草稿互相覆盖
+          draftPrefix: bot.id,
+          // 成员 session 的 promptSeq 与群聊消息序号无关，带上只会让前端
+          // 锚定失败丢弃草稿 —— 不传，前端把草稿渲染在列表尾部
+          omitPromptSeq: true,
           conversation: group === undefined ? undefined : {
             id: group.id,
             type: 'group',
@@ -463,6 +494,8 @@ export class ChatGroup extends Service {
       id,
       sessionId: `session-${randomUUID()}` as SessionId,
       workspaceDir,
+      ...(input.aiFatigueRounds !== undefined ? { aiFatigueRounds: input.aiFatigueRounds } : {}),
+      ...(input.mentionOthersReply !== undefined ? { mentionOthersReply: input.mentionOthersReply } : {}),
       createdAt: now,
       updatedAt: now,
     }
@@ -473,11 +506,24 @@ export class ChatGroup extends Service {
     return record
   }
 
-  /** Patch a group (name, avatar, members). */
+  /** Patch a group (name, avatar, members, fatigue threshold). */
   async update(id: string, patch: GroupUpdatePatch): Promise<GroupRecord> {
     const current = this.get(id)
     if (current === undefined) throw new Error(`chat-group: group "${id}" not found`)
-    const next: GroupRecord = { ...current, ...patch, updatedAt: Date.now() }
+    // 只挑已知字段：PUT 处理器把请求体原样 cast 进来，前端可能带 introduction
+    // 等额外键，直接展开会把它们写进存储记录。
+    const { name, avatar, memberBotIds, aiFatigueRounds, mentionOthersReply } = patch
+    const validFatigue = typeof aiFatigueRounds === 'number' && Number.isInteger(aiFatigueRounds) && aiFatigueRounds > 0
+    const next: GroupRecord = {
+      ...current,
+      ...(name !== undefined ? { name } : {}),
+      ...(avatar !== undefined ? { avatar } : {}),
+      ...(memberBotIds !== undefined ? { memberBotIds } : {}),
+      // 显式传 undefined 时按「未设置」处理（读取侧回落默认 5）
+      ...(aiFatigueRounds === undefined ? {} : validFatigue ? { aiFatigueRounds } : {}),
+      ...(mentionOthersReply !== undefined ? { mentionOthersReply } : {}),
+      updatedAt: Date.now(),
+    }
     await this.store.table('groups').put(id, next)
     return next
   }
@@ -583,6 +629,9 @@ export class ChatGroup extends Service {
     this.groupActivity.set(group.id, Date.now())
     // 用户重新开口即解除上一次的停止，否则此后该群永远不会再有 AI 回应
     this.stopped.delete(group.id)
+    // 用户参与了对话：自主对话疲劳计数清零（用户发言后 AI 之间的正常接话
+    // 不该被衰减门误伤）
+    this.aiRoundStreak.delete(group.id)
     void this.runCascade(group, { senderId: 'user', senderName, text })
       .catch(error => this.ctx.logger.error('chat-group cascade: %o', error))
   }
@@ -598,11 +647,16 @@ export class ChatGroup extends Service {
       }),
     )
     const hasMention = mentionedBotIds.size > 0
+    // 「@ 专属回复」：用户 @ 了成员时，若群未开启「其他成员也可回复」
+    // （mentionOthersReply，默认关），则跳过调度者，只有被 @ 的成员直接
+    // 回复——避免 @ 某人私事时其他成员乱插话。开启后走正常调度。
+    // 仅对用户消息的首轮生效；后续轮次仍由调度者决定是否有人接话。
+    const mentionOnly = hasMention && message.senderId === 'user' && group.mentionOthersReply !== true
 
     // 占用该群：空闲触发器会跳过正在说话的群，避免两段对话交错重叠
     this.cascading.add(group.id)
     try {
-      await this.cascadeRounds(group, message, maxRounds, hasMention, mentionedBotIds)
+      await this.cascadeRounds(group, message, maxRounds, hasMention, mentionedBotIds, mentionOnly)
     } finally {
       this.cascading.delete(group.id)
       // 兜底：任何退出路径都必须关掉指示器，否则群里会一直挂着"思考中"
@@ -622,6 +676,7 @@ export class ChatGroup extends Service {
     maxRounds: number,
     hasMention: boolean,
     mentionedBotIds: ReadonlySet<string>,
+    mentionOnly = false,
   ): Promise<void> {
     for (let round = 0; round < maxRounds; round++) {
       // 用户点了停止：不再发起新一轮调度，对话到此为止
@@ -629,10 +684,21 @@ export class ChatGroup extends Service {
         await traceGroup(`ROUND ${round}: STOPPED by user → cascade aborts`)
         return
       }
-      await traceGroup(`=== ROUND ${round} | sender=${message.senderId} text="${message.text.slice(0, 80)}" ===`)
-      // 每一轮调度都单独显示一次"思考中"：AI 接话后还会再决策一次要不要
-      // 有人接着说，这个过程同样需要反馈，否则用户会以为卡住了。
-      const responders = await this.scheduleRound(group, message, round, hasMention, mentionedBotIds)
+      // 自主对话计数：本轮要回应的消息来自 AI（而非用户），说明对话正在
+      // 成员之间自我延续。round 0 回应用户消息时不计。
+      if (message.senderId !== 'user') {
+        this.aiRoundStreak.set(group.id, (this.aiRoundStreak.get(group.id) ?? 0) + 1)
+      }
+      await traceGroup(`=== ROUND ${round} | sender=${message.senderId} aiStreak=${this.aiRoundStreak.get(group.id) ?? 0} text="${message.text.slice(0, 80)}" ===`)
+      // 「@ 专属回复」模式（用户 @ 了成员且未开启「其他成员也可回复」）：
+      // 被提示的成员说完即结束，不再级联——继续触发调度只会让未指向的
+      // 成员插进来，违背「专属」语义；若每轮都跑调度，@ 私聊式提问会
+      // 立刻被拉回群聊模式。后续轮次的级联只由普通消息驱动。
+      const responders = mentionOnly
+        ? round === 0
+          ? await this.scheduleRound(group, message, round, hasMention, mentionedBotIds, true)
+          : []
+        : await this.scheduleRound(group, message, round, hasMention, mentionedBotIds)
       await traceGroup(`ROUND ${round}: responders=${responders.length} [${responders.map(b => b.id).join(',')}]`)
       if (responders.length === 0) {
         await traceGroup(`ROUND ${round}: EMPTY → cascade ends`)
@@ -668,7 +734,18 @@ export class ChatGroup extends Service {
     round: number,
     hasMention: boolean,
     mentionedBotIds: ReadonlySet<string>,
+    skipScheduler = false,
   ): Promise<BotRecord[]> {
+    // @ 专属回复：不经过调度者（也就不亮"思考中"），被 @ 的成员直接说
+    if (skipScheduler) {
+      const forced = group.memberBotIds
+        .filter(botId => mentionedBotIds.has(botId))
+        .map(botId => this.ctx.chatBots.get(botId))
+        .filter((bot): bot is BotRecord => bot !== undefined)
+        .filter(bot => bot.id !== message.senderId)
+      await traceGroup(`scheduleRound: MENTION-ONLY → ${forced.map(b => b.id).join(',') || '(none)'}`)
+      return forced
+    }
     this.broadcastScheduling(group.id, true)
     try {
       return await this.selectResponders(group, message, round, hasMention, mentionedBotIds)
@@ -748,7 +825,22 @@ export class ChatGroup extends Service {
     // rest get their turn in the following cascade rounds rather than all
     // talking over the same message at once.
     const all = [...forced, ...scheduled].filter(bot => bot.id !== message.senderId)
-    const responders = all.slice(0, MAX_SPEAKERS_PER_ROUND_CAP)
+
+    // ── 自主对话疲劳门 ─────────────────────────────────────────────────
+    // 连续无用户参与的轮数超过阈值后，未指向（未被 @）的回复按轮衰减：
+    // 每个非 forced 回复独立掷骰，保留概率 FATIGUE_KEEP_DECAY^超出轮数。
+    // forced（被 @ 的成员）永远放行——明确指向的回应不受疲劳影响。
+    const threshold = group.aiFatigueRounds ?? DEFAULT_AI_FATIGUE_ROUNDS
+    const excess = (this.aiRoundStreak.get(group.id) ?? 0) - threshold
+    const keepProb = excess >= 1 ? FATIGUE_KEEP_DECAY ** excess : 1
+    let responders = all.slice(0, MAX_SPEAKERS_PER_ROUND_CAP)
+    if (excess >= 1) {
+      const before = responders.length
+      responders = responders.filter(bot => forced.includes(bot) || Math.random() < keepProb)
+      await traceGroup(
+        `selectResponders: FATIGUE streak=${this.aiRoundStreak.get(group.id) ?? 0} threshold=${threshold} keepProb=${keepProb.toFixed(2)} ${before}→${responders.length}`,
+      )
+    }
 
     await traceGroup(`selectResponders: RESULT forced=${forced.length} scheduled=${scheduled.length} picked=${responders.length}/${all.length} [${responders.map(b => b.id).join(',')}]`)
     if (responders.length > 0) return responders
@@ -756,6 +848,12 @@ export class ChatGroup extends Service {
     // Nobody chose to speak. With the fallback off (default) that is a valid
     // outcome — the group simply stays quiet.
     if (this.config.fallbackEnabled !== true) return []
+    // 「宁可多说一句」的兜底同样受疲劳门约束：自我延续太久后，无指向的
+    // 强行接话正是这条规则要阻止的行为。同样掷骰，而非一刀切禁言。
+    if (excess >= 1 && Math.random() >= keepProb) {
+      await traceGroup(`selectResponders: FATIGUE suppresses fallback (keepProb=${keepProb.toFixed(2)})`)
+      return []
+    }
     const fallback = candidates[0] ?? eligible.find(bot => !forced.includes(bot))
     return fallback === undefined ? [] : [fallback]
   }
@@ -804,6 +902,9 @@ export class ChatGroup extends Service {
             }
           }),
           maxSpeakers,
+          // 疲劳上下文：让调度模型同步提高门槛，与确定性掷骰门双保险
+          aiOnlyRounds: this.aiRoundStreak.get(group.id) ?? 0,
+          fatigueStart: group.aiFatigueRounds ?? DEFAULT_AI_FATIGUE_ROUNDS,
           provider: routeIdFor(model.id),
           model: model.modelName,
         })
@@ -1026,6 +1127,8 @@ export class ChatGroup extends Service {
     try {
       const spoken = await this.speak(group, bot, 'idle')
       if (spoken === null) return
+      // 主动开口本身就是一轮无用户参与的对话，计入疲劳
+      this.aiRoundStreak.set(group.id, (this.aiRoundStreak.get(group.id) ?? 0) + 1)
       this.lastIdleTurn.set(group.id, { botId: bot.id, at: Date.now() })
       const maxRounds = this.config.maxGroupRounds ?? DEFAULT_MAX_GROUP_ROUNDS
       await this.cascadeRounds(group, spoken, maxRounds, false, new Set())
@@ -1146,6 +1249,18 @@ export class ChatGroup extends Service {
                 workspaceDir: typeof body.workspaceDir === 'string'
                   ? body.workspaceDir
                   : typeof body.workspace_dir === 'string' ? body.workspace_dir : undefined,
+                // 自主对话疲劳阈值（正整数；非法值忽略，读取侧用默认 5）
+                ...(typeof body.aiFatigueRounds === 'number' && Number.isInteger(body.aiFatigueRounds) && body.aiFatigueRounds > 0
+                  ? { aiFatigueRounds: body.aiFatigueRounds }
+                  : typeof body.ai_fatigue_rounds === 'number' && Number.isInteger(body.ai_fatigue_rounds) && body.ai_fatigue_rounds > 0
+                    ? { aiFatigueRounds: body.ai_fatigue_rounds }
+                    : {}),
+                // @ 时其他成员是否也可回复（缺省 false：仅被 @ 成员回复）
+                ...(typeof body.mentionOthersReply === 'boolean'
+                  ? { mentionOthersReply: body.mentionOthersReply }
+                  : typeof body.mention_others_reply === 'boolean'
+                    ? { mentionOthersReply: body.mention_others_reply }
+                    : {}),
               })
               return json(res, 200, group)
             }
@@ -1217,7 +1332,29 @@ export class ChatGroup extends Service {
             return group === undefined ? json(res, 404, { error: 'group not found' }) : json(res, 200, group)
           }
           if (req.method === 'PUT' || req.method === 'PATCH') {
-            const group = await this.update(groupId, await readBody(req) as GroupUpdatePatch)
+            const body = await readBody(req)
+            // 前端按 snake_case 发 ai_fatigue_rounds，归一化成记录的驼峰字段
+            const group = await this.update(groupId, {
+              ...(typeof body.name === 'string' ? { name: body.name } : {}),
+              ...(typeof body.avatar === 'string' ? { avatar: body.avatar } : {}),
+              ...(Array.isArray(body.memberBotIds)
+                ? { memberBotIds: body.memberBotIds.filter((v): v is string => typeof v === 'string') }
+                : {}),
+              ...(body.aiFatigueRounds !== undefined || body.ai_fatigue_rounds !== undefined
+                ? {
+                  aiFatigueRounds: typeof body.aiFatigueRounds === 'number'
+                    ? body.aiFatigueRounds
+                    : typeof body.ai_fatigue_rounds === 'number' ? body.ai_fatigue_rounds : undefined,
+                }
+                : {}),
+              ...(body.mentionOthersReply !== undefined || body.mention_others_reply !== undefined
+                ? {
+                  mentionOthersReply: typeof body.mentionOthersReply === 'boolean'
+                    ? body.mentionOthersReply
+                    : typeof body.mention_others_reply === 'boolean' ? body.mention_others_reply : undefined,
+                }
+                : {}),
+            } as GroupUpdatePatch)
             return json(res, 200, group)
           }
           if (req.method === 'DELETE') {

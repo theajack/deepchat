@@ -1851,8 +1851,15 @@ export class ChatBots extends Service {
       path: '/chatapi/tools',
       handler: (req, res) => {
         if (req.method !== 'GET') return json(res, 405, { error: 'method not allowed' })
-        // 全局注册表投影（对 bot agent 还会叠加 persona/preset 作用域工具）
+        // 全局注册表投影（对 bot agent 还会叠加 persona/preset 作用域工具）。
+        //
+        // MCP 工具（mcp__<server>__<tool>）在这里排除：它们由 MCP 面板按
+        // 服务粒度管理（enabledMcpServers 按前缀放行），混进这个列表会被
+        // 误标为 builtin —— 工具页显示一堆 mcp__ 工具，创建好友时的"默认
+        // 全选内置工具"预选还会把它们整个带上。
+        const MCP_TOOL_PREFIX = 'mcp__'
         const schemas = this.ctx.tools.schemas()
+          .filter(schema => !schema.name.startsWith(MCP_TOOL_PREFIX))
         // 作用域工具（注册在每个 agent 的 setup 里，不在全局注册表中）：
         // 手动补充到列表，否则工具页与白名单选择器看不到它们
         const scoped = [

@@ -18,8 +18,15 @@ const emit = defineEmits<{ close: [] }>();
           ✕
         </button>
       </div>
-      <div class="overflow-y-auto overflow-x-hidden p-6">
+      <div class="min-h-0 flex-1 overflow-y-auto overflow-x-hidden p-6">
         <slot />
+      </div>
+      <!--
+        footer 放在滚动容器之外：天然紧贴弹窗底边（无 padding 缝隙），也不
+        随内容滚动。使用方通过 <template #footer> 提供按钮组。
+      -->
+      <div v-if="$slots.footer" class="flex shrink-0 justify-end gap-2 border-t border-line bg-ink-1 px-6 py-3.5">
+        <slot name="footer" />
       </div>
     </div>
   </div>

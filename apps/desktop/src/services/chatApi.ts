@@ -180,8 +180,12 @@ export class ChatApi {
     introduction = '',
     /** 群聊共享工作目录；留空由后端分配默认目录 */
     workspaceDir?: string,
+    /** 自主对话疲劳阈值（连续无用户参与轮数超过它后未指向回复开始衰减） */
+    aiFatigueRounds?: number,
+    /** @某成员时其他非@成员是否也可回复（缺省 false：仅被@成员回复） */
+    mentionOthersReply?: boolean,
   ): Promise<Conversation> {
-    return this.t.request('conversation.createGroup', { name, botIds, introduction, workspaceDir })
+    return this.t.request('conversation.createGroup', { name, botIds, introduction, workspaceDir, aiFatigueRounds, mentionOthersReply })
   }
   listGroupMembers(conversationId: string): Promise<Bot[]> {
     return this.t.request('conversation.members', { id: conversationId })

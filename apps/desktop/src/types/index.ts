@@ -66,11 +66,19 @@ export interface Conversation {
   created_at: number
   /** 群聊共享工作目录（仅群聊有值）；创建后不可修改 */
   workspace_dir?: string | null
+  /** 群聊自主对话疲劳阈值：连续无用户参与轮数超过它后未指向回复开始衰减（仅群聊有值） */
+  ai_fatigue_rounds?: number | null
+  /** @某成员时其他非@成员是否也可回复（仅群聊有值；缺省 false = 仅被@成员回复） */
+  mention_others_reply?: boolean | null
 }
 
 export interface UpdateConversationInput {
   name?: string
   introduction?: string
+  /** 群聊自主对话疲劳阈值（正整数；创建与编辑均可设置） */
+  ai_fatigue_rounds?: number
+  /** @某成员时其他非@成员是否也可回复 */
+  mention_others_reply?: boolean
 }
 
 /** 消息内容段：思维链 / 正文 / 工具调用 交替，保持模型输出原始顺序 */

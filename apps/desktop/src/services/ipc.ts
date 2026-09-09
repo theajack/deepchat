@@ -61,6 +61,10 @@ interface DshGroup {
   sessionId: string
   /** 群聊共享工作目录（后端创建时分配或用户指定） */
   workspaceDir?: string
+  /** 自主对话疲劳阈值（未设置时后端按 5 处理） */
+  aiFatigueRounds?: number
+  /** @某成员时其他成员是否也可回复（缺省 false） */
+  mentionOthersReply?: boolean
   createdAt: number
   updatedAt: number
 }
@@ -439,6 +443,8 @@ export class DshTransport implements IpcTransport {
           unread_count: 0,
           created_at: group.createdAt,
           workspace_dir: group.workspaceDir ?? null,
+          ai_fatigue_rounds: group.aiFatigueRounds ?? null,
+          mention_others_reply: group.mentionOthersReply ?? null,
         }
       })
       return [...groupList, ...privates] as T
@@ -468,6 +474,8 @@ export class DshTransport implements IpcTransport {
         name: params.name,
         memberBotIds: params.botIds,
         ...(groupWorkspaceDir !== undefined ? { workspaceDir: groupWorkspaceDir } : {}),
+        ...(typeof params.aiFatigueRounds === 'number' ? { aiFatigueRounds: params.aiFatigueRounds } : {}),
+        ...(typeof params.mentionOthersReply === 'boolean' ? { mentionOthersReply: params.mentionOthersReply } : {}),
       })
       return {
         id: group.id,
@@ -480,6 +488,8 @@ export class DshTransport implements IpcTransport {
         unread_count: 0,
         created_at: group.createdAt,
         workspace_dir: group.workspaceDir ?? null,
+        ai_fatigue_rounds: group.aiFatigueRounds ?? null,
+        mention_others_reply: group.mentionOthersReply ?? null,
       } as T
     }
     if (method === 'conversation.members') {
@@ -511,6 +521,8 @@ export class DshTransport implements IpcTransport {
         unread_count: 0,
         created_at: group.createdAt,
         workspace_dir: group.workspaceDir ?? null,
+        ai_fatigue_rounds: group.aiFatigueRounds ?? null,
+        mention_others_reply: group.mentionOthersReply ?? null,
       } as T
     }
     if (method === 'conversation.markRead') return undefined as T

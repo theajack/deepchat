@@ -55,9 +55,36 @@ export interface BridgeTarget {
   readonly emitFinal: boolean
   /** Full Conversation record for the `conversation.updated` broadcast. */
   readonly conversation?: Record<string, unknown> | undefined
+  /**
+   * Draft-id namespace prefix (group chats pass the member's bot id).
+   *
+   * Group member sessions are per-bot, so two members speaking over the same
+   * message both produce `m-p0` — their streams would overwrite each other in
+   * one shared draft. Prefixing keeps one draft per member. Also see
+   * {@link BridgeTarget.omitPromptSeq} for why group frames drop promptSeq.
+   */
+  readonly draftPrefix?: string | undefined
+  /**
+   * Suppress `promptSeq` in stream frames (group chats).
+   *
+   * The front end anchors a draft right after "the Nth user message of the
+   * conversation" using promptSeq. In a group, N counts the *member's own*
+   * session prompts — unrelated to the group's user-message count — so the
+   * anchor never matches and the draft is silently dropped. Without the field
+   * the draft renders at the tail, which is correct for groups.
+   */
+  readonly omitPromptSeq?: boolean | undefined
 }
 
 export type Broadcast = (event: string, data: unknown) => void
+
+/** The streaming draft id for the current prompt of one session. */
+function draftIdOf(session: Session, target: BridgeTarget): string {
+  const seq = promptSeqOf(session)
+  return target.draftPrefix === undefined
+    ? `m-p${String(seq)}`
+    : `${target.draftPrefix}-m-p${String(seq)}`
+}
 
 /** The front-end `Message` shape built from one aggregated turn. */
 export function toCreatedMessage(row: ChatMessageRow, target: BridgeTarget): Record<string, unknown> {
@@ -168,7 +195,9 @@ export function translateSessionEvent(session: Session, event: SessionEvent, tar
       // replace the draft with the final message in place.
       const row = aggregatePrompt(session, promptSeqOf(session), target.botId, target.botName)
       broadcast('message.stream', {
-        messageId: row.id,
+        // done 帧的 messageId 必须与流式期间的草稿 id 一致（群聊带前缀），
+        // 否则前端删不掉草稿，最终消息与草稿并存
+        messageId: draftIdOf(session, target),
         conversationId: target.conversationId,
         botId: target.botId,
         delta: '',
@@ -189,7 +218,7 @@ export function translateSessionEvent(session: Session, event: SessionEvent, tar
     }
     case 'assistant/chunk': {
       const chunk = event.data.chunk
-      const draftId = `m-p${String(promptSeqOf(session))}`
+      const draftId = draftIdOf(session, target)
       if (chunk.type === 'text-delta' || chunk.type === 'reasoning-delta') {
         broadcast('message.stream', {
           messageId: draftId,
@@ -199,8 +228,10 @@ export function translateSessionEvent(session: Session, event: SessionEvent, tar
           reasoning: chunk.type === 'reasoning-delta',
           done: false,
           // promptSeq 用于前端把 draft 紧跟到对应的用户消息后（按 N
-          // 索引而不是 id 配对，规避前后端 id 命名空间不同步的问题）
-          promptSeq: promptSeqOf(session),
+          // 索引而不是 id 配对，规避前后端 id 命名空间不同步的问题）。
+          // 群聊 omit：成员 session 的 N 与群消息序号无关，锚不上反而
+          // 导致草稿被丢弃（见 BridgeTarget.omitPromptSeq）
+          ...(target.omitPromptSeq === true ? {} : { promptSeq: promptSeqOf(session) }),
         })
       } else if (chunk.type === 'tool-call-delta') {
         // 携带 conversationId/botId 与 chunk.name（首个 delta 通常带工具名），
@@ -218,7 +249,7 @@ export function translateSessionEvent(session: Session, event: SessionEvent, tar
     }
     case 'tool/call': {
       broadcast('agent.tool.start', {
-        draftId: `m-p${String(promptSeqOf(session))}`,
+        draftId: draftIdOf(session, target),
         conversationId: target.conversationId,
         botId: target.botId,
         id: event.data.callId,
@@ -230,7 +261,7 @@ export function translateSessionEvent(session: Session, event: SessionEvent, tar
     case 'tool/result': {
       const block = event.data.message.content[0]
       broadcast('agent.tool.end', {
-        draftId: `m-p${String(promptSeqOf(session))}`,
+        draftId: draftIdOf(session, target),
         id: block?.toolCallId ?? '',
         result: { content: block?.content ?? [], isError: block?.isError },
         status: 'success',

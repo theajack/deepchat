@@ -234,12 +234,14 @@ async function pickWorkspaceDir() {
   }
 }
 
+/** 六位随机小写字母：默认名后缀（好友Xyabzc），避免重名 */
+function randomSuffix(): string {
+  return Array.from({ length: 6 }, () => String.fromCharCode(97 + Math.floor(Math.random() * 26))).join("");
+}
+
 async function save() {
-  const name = form.name.trim();
-  if (!name) {
-    app.toast(t("bot.fillNameFirst"));
-    return;
-  }
+  // 名称非必填：留空时生成「好友+六位随机字母」
+  const name = form.name.trim() || `${t("bot.defaultNamePrefix")}${randomSuffix()}`;
   const model = selectedModel();
   if (!model) {
     app.toast(t("bot.chooseModel"));
@@ -490,13 +492,15 @@ async function save() {
           {{ isNew ? t("bot.workspaceDirHint") : t("bot.workspaceDirLockedHint") }}
         </p>
       </div>
-      <div class="flex justify-end gap-2 pt-1">
-        <button class="rounded-lg border border-line-strong/50 px-4 py-2 text-[13px] text-mid transition-all hover:bg-ink-3 hover:text-hi"
-          @click="app.closeBotEditor()">{{ t("common.cancel") }}</button>
-        <button class="rounded-lg bg-gradient-to-br from-accent to-accent-deep px-4 py-2 text-[13px] font-semibold text-on-accent shadow-[0_4px_18px_rgba(42,227,164,0.28)] transition-all hover:shadow-[0_4px_24px_var(--color-accent-glow)] hover:brightness-110 active:scale-95"
-          @click="save">{{ t("common.save") }}</button>
-      </div>
     </div>
+
+    <!-- 群聊 tab 由 GroupForm 自带的 Modal 接管（自带 footer），此处不重复显示 -->
+    <template v-if="tab !== 'group'" #footer>
+      <button class="rounded-lg border border-line-strong/50 px-4 py-2 text-[13px] text-mid transition-all hover:bg-ink-3 hover:text-hi"
+        @click="app.closeBotEditor()">{{ t("common.cancel") }}</button>
+      <button class="rounded-lg bg-gradient-to-br from-accent to-accent-deep px-4 py-2 text-[13px] font-semibold text-on-accent shadow-[0_4px_18px_rgba(42,227,164,0.28)] transition-all hover:shadow-[0_4px_24px_var(--color-accent-glow)] hover:brightness-110 active:scale-95"
+        @click="save">{{ t("common.save") }}</button>
+    </template>
   </Modal>
 
   <ModelEditorModal v-if="showModelEditor" :editing-id="null" @close="showModelEditor = false"

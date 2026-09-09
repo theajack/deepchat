@@ -1,11 +1,9 @@
 <script setup lang="ts">
 import { computed, onMounted } from "vue";
-import Modal from "../components/common/Modal.vue";
 import GroupForm from "../components/contacts/GroupForm.vue";
 import { useAppStore } from "../stores/app";
 import { useConversationsStore } from "../stores/conversations";
 import { useModelsStore } from "../stores/models";
-import { t } from "../i18n";
 
 const app = useAppStore();
 const conversations = useConversationsStore();
@@ -17,7 +15,6 @@ onMounted(() => {
 
 const editing = computed(() => app.editingGroup);
 const isNew = computed(() => editing.value === "new");
-const title = computed(() => (isNew.value ? t("contacts.startGroup") : t("contacts.editGroup")));
 const group = computed(() => {
   const e = editing.value;
   return e === "new" || e === null ? null : e;
@@ -38,13 +35,13 @@ function onSaved() {
 </script>
 
 <template>
-  <Modal v-if="editing" :title="title" wide @close="app.closeGroupEditor()">
-    <GroupForm
-      :group="group"
-      :preset-ids="isNew ? app.groupEditorPreset : null"
-      @cancel="app.closeGroupEditor()"
-      @created="onCreated"
-      @saved="onSaved"
-    />
-  </Modal>
+  <!-- GroupForm 自带 Modal（含贴底 footer），这里只负责状态接线 -->
+  <GroupForm
+    v-if="editing"
+    :group="group"
+    :preset-ids="isNew ? app.groupEditorPreset : null"
+    @cancel="app.closeGroupEditor()"
+    @created="onCreated"
+    @saved="onSaved"
+  />
 </template>

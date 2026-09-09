@@ -53,6 +53,12 @@ export interface ScheduleRequest {
   readonly candidates: readonly ScheduleCandidate[]
   /** Hard cap on how many bots may speak this round. */
   readonly maxSpeakers: number
+  /**
+   * 连续无用户参与的 AI 对话轮数（供疲劳机制提示用；缺省 0 = 用户刚说过话）。
+   */
+  readonly aiOnlyRounds?: number
+  /** 疲劳阈值：aiOnlyRounds 超过它后提示调度者提高未指向回复的门槛。 */
+  readonly fatigueStart?: number
   /** Provider route id. */
   readonly provider: string
   /** Provider model name. */
@@ -88,9 +94,25 @@ function schedulingPrompt(request: ScheduleRequest): string {
   const transcript = request.transcript.length > CONTEXT_LIMIT
     ? `…${request.transcript.slice(-CONTEXT_LIMIT)}`
     : request.transcript
+  const aiOnly = request.aiOnlyRounds ?? 0
+  const fatigueStart = request.fatigueStart ?? Number.POSITIVE_INFINITY
+  // 超过阈值后，每多一轮提示强度递增（封顶，避免提示词膨胀）
+  const fatigueExcess = aiOnly > fatigueStart ? Math.min(aiOnly - fatigueStart, 6) : 0
+  const fatigueSection = fatigueExcess > 0
+    ? [
+      '',
+      '## 特别注意：对话已经自我延续很久了',
+      `成员们已经连续 ${String(aiOnly)} 轮在没有用户参与的情况下互相接话。`,
+      '这种自我延续往往没有价值，甚至在原地打转。请大幅提高开口门槛：',
+      '- 只有最新消息**明确点名、@、或直接提问**某位候选成员时，才选择他',
+      '- 纯粹的附和、礼貌性回应、没有新信息的补充，一律不要选',
+      '- 拿不准时输出 []，让对话自然停下——此时安静比继续更有价值',
+    ]
+    : []
   return [
     `你是群聊「${request.groupName}」的发言调度者。`,
     '',
+    ...fatigueSection,
     '## 你的任务',
     '判断下面这些群成员中，谁应该对「最新的消息」作出回应。你不是要代替他们说话，只是决定「谁该开口」。',
     '',

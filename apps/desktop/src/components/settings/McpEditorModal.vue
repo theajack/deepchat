@@ -257,18 +257,17 @@ async function save() {
       </template>
 
       <p v-if="jsonError" class="rounded-lg border border-danger/30 bg-danger/10 p-2 text-[11.5px] leading-relaxed text-danger">{{ jsonError }}</p>
-
-      <!-- 底部操作：取消在左，保存在右 -->
-      <div class="flex items-center justify-end gap-2 pt-1">
-        <button @click="emit('close')"
-          class="rounded-lg border border-line px-4 py-1.5 text-[12.5px] text-mid transition-colors hover:border-accent/40 hover:text-accent">
-          {{ t("common.cancel") }}
-        </button>
-        <button @click="save" :disabled="saving"
-          class="rounded-lg bg-accent/90 px-4 py-1.5 text-[12.5px] font-medium text-on-accent transition-opacity disabled:opacity-60">
-          {{ saving ? t("common.saving") : t("common.save") }}
-        </button>
-      </div>
     </div>
+
+    <template #footer>
+      <button @click="emit('close')"
+        class="rounded-lg border border-line px-4 py-1.5 text-[12.5px] text-mid transition-colors hover:border-accent/40 hover:text-accent">
+        {{ t("common.cancel") }}
+      </button>
+      <button @click="save" :disabled="saving"
+        class="rounded-lg bg-accent/90 px-4 py-1.5 text-[12.5px] font-medium text-on-accent transition-opacity disabled:opacity-60">
+        {{ saving ? t("common.saving") : t("common.save") }}
+      </button>
+    </template>
   </Modal>
 </template>
