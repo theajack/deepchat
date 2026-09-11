@@ -595,7 +595,8 @@ export class ChatGroup extends Service {
       await table.put(key, binding)
     }
 
-    const agentOptions = { provider: bot.provider, model: bot.model }
+    // 与私聊一致：按模型唯一 ID 解析路由与端点模型名，改模型不影响好友绑定
+    const agentOptions = this.ctx.chatBots.resolveBotModel(bot)
     // 与私聊共用同一套能力装配：persona、Agent 开关三重防线、工具白名单、
     // 启用技能目录 + scoped `skill` 工具（群聊沿用 bot 自己的工作区围栏）。
     const skillSummaries = await resolveEnabledSkills(this.ctx, bot)

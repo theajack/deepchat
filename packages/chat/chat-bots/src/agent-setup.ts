@@ -46,6 +46,27 @@ function renderCatalog(summaries: readonly EnabledSkillSummary[]): string {
   ].join('\n')
 }
 
+/**
+ * 身份段：把好友的名字与人设一并交给 Agent，并明确「你就是这个名字」。
+ *
+ * 只给人设不够——模型不知道自己在应用里叫什么，被问到「你是谁」时会编造
+ * 身份或自称「AI 助手」，与界面上显示的好友名对不上。所以名字要显式声明，
+ * 并说明这就是用户在应用里设定的称呼。
+ */
+export function renderIdentity(bot: BotRecord): string {
+  const name = bot.name.trim()
+  const lines: string[] = []
+  if (name !== '') {
+    lines.push(`你的名字是「${name}」——这是用户在应用里为你设定的称呼，你就是${name}。`)
+    lines.push('当用户问起你是谁、你叫什么名字时，请自然地回答这个名字，不要编造别的身份，也不要自称"AI 助手"或"语言模型"。')
+  }
+  const persona = bot.persona.trim()
+  if (persona !== '') {
+    lines.push('', '你的人设与行为准则：', persona)
+  }
+  return lines.join('\n')
+}
+
 /** Normalize an openUrl target: http(s)/file URL or local path → file:// URL. */
 function resolveOpenUrlTarget(
   raw: string,
@@ -171,7 +192,7 @@ function registerFetchTool(agentCtx: Context): void {
  * Build the agent setup callback for one bot. The returned callback is passed
  * straight to `ctx.agents.create/resume({ setup })`; it applies:
  *
- * 1. the persona prompt section;
+ * 1. the identity prompt section (the bot's name plus its persona);
  * 2. the long-term memory document (survives conversation clearing);
  * 3. the agent-disable triple guard when `agentEnabled` is off (no tool
  *    schemas, an explicit no-tools prompt, and a denying execution guard);
@@ -205,9 +226,9 @@ export function buildBotAgentSetup(
 
   return (agentCtx: Context): void => {
     agentCtx.systemPrompt.section({
-      name: 'chat:persona',
+      name: 'chat:identity',
       order: 0,
-      text: bot.persona,
+      text: renderIdentity(bot),
     })
 
     // 记忆段必须在 agentEnabled 的 early return 之前注册：

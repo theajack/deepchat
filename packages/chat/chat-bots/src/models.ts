@@ -73,6 +73,18 @@ export function routeIdFor(id: string): string {
   return `chat-${id}`
 }
 
+/**
+ * The inverse of {@link routeIdFor}: recover the model id from a route key.
+ *
+ * Used to backfill legacy bot records that only stored the route; returns
+ * undefined when the value is not one of our routes.
+ */
+export function modelIdFromRoute(route: string): string | undefined {
+  return route.startsWith('chat-') && route.length > 'chat-'.length
+    ? route.slice('chat-'.length)
+    : undefined
+}
+
 /** The credential reference (environment-variable name) this record owns. */
 export function apiKeyRefFor(id: string): string {
   return `CHAT_AGENT_MODEL_${id.replace(/-/g, '_').toUpperCase()}`

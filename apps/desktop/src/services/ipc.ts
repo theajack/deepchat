@@ -192,6 +192,8 @@ function fromFrontBotInput(input: Record<string, unknown>): Record<string, unkno
     agentEnabled: Number(input.agent_enabled ?? 0) === 1,
     provider: input.model_provider == null ? undefined : String(input.model_provider),
     model: input.model_name == null ? undefined : String(input.model_name),
+    // 模型唯一 ID：好友绑定的是这条模型记录本身，而不是端点/模型名快照
+    modelId: input.model_id == null || input.model_id === '' ? undefined : String(input.model_id),
     trigger: fromFrontTrigger(input.trigger_config as Record<string, unknown> | undefined),
     ...(workspaceDir !== undefined ? { workspaceDir } : {}),
     ...(enabledTools !== undefined ? { enabledTools } : {}),

@@ -21,7 +21,7 @@ const showUsage = ref(false);
 
 const defaultId = computed(() => settings.values["default_model_id"] ?? "");
 /**
- * 通用处理模型：用于生成人设 / 自我介绍 / 群聊介绍这类编辑辅助调用。
+ * 通用模型：用于生成人设 / 自我介绍 / 群聊介绍这类编辑辅助调用，以及群聊调度。
  *
  * 存在后端而非 localStorage，所以不能用 settings.values 读，单独拉取。
  * 未显式设置时会依次回落到 AI 好友默认使用模型、列表首个模型，因此区分两个值：
@@ -113,7 +113,7 @@ async function setGeneral(m: ModelConfig) {
     // 只在已显式指定该模型时才是「取消」，否则是「设置」
     await chatApi.setGeneralModel(isExplicitGeneral(m) ? null : m.id);
     await loadGeneral();
-    app.toast(isExplicitGeneral(m) ? t("model.clearedGeneral") : t("model.setGeneral", { name: m.name }));
+    app.toast(isExplicitGeneral(m) ? t("model.setGeneral") : t("model.clearedGeneral", { name: m.name }));
   } catch (e) {
     app.toast(e instanceof Error ? e.message : String(e));
   }

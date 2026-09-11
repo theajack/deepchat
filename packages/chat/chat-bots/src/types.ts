@@ -44,9 +44,18 @@ export interface BotRecord {
   readonly avatar?: string | undefined
   /** Persona text injected as this bot's agent persona prompt section. */
   readonly persona: string
-  /** Provider route of this bot's model. */
+  /**
+   * Stable reference to the `ModelRecord.id` this bot uses.
+   *
+   * The agent's route (`provider`) and the endpoint model id (`model`) are
+   * resolved from it at agent-creation time, so editing a model's endpoint,
+   * model name or provider never strands a bot on a stale value.
+   * Missing means a legacy record: fall back to the stored `provider`/`model`.
+   */
+  readonly modelId?: string | undefined
+  /** Provider route of this bot's model (a derived cache; see `modelId`). */
   readonly provider: string
-  /** Model id interpreted by the provider adapter. */
+  /** Model id interpreted by the provider adapter (a derived cache). */
   readonly model: string
   /** Group trigger policy. */
   readonly trigger: TriggerConfig

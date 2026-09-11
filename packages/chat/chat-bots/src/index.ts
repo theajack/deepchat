@@ -33,9 +33,9 @@ import type {} from '@deepseek-ai/dsh-tools'
 // Side-effect type import: pulls in the `settings`/`credentials` augmentations.
 import type {} from '@deepseek-ai/dsh-settings'
 import type {} from '@deepseek-ai/dsh-credentials'
-import { ModelPreferenceStore, DEFAULT_MODEL_KEY, GROUP_JUDGE_MODEL_KEY, type ModelRecord, mirrorDeepSeekCredential, modelRecordSchema, ModelStore, removeRoute, routeIdFor, syncRoute } from './models.ts'
+import { ModelPreferenceStore, DEFAULT_MODEL_KEY, GROUP_JUDGE_MODEL_KEY, type ModelRecord, mirrorDeepSeekCredential, modelIdFromRoute, modelRecordSchema, ModelStore, removeRoute, routeIdFor, syncRoute } from './models.ts'
 import { formatInstalls, installGithubSkill, searchSkillsApi } from './skills-remote.ts'
-import { buildBotAgentSetup, resolveEnabledSkills } from './agent-setup.ts'
+import { buildBotAgentSetup, renderIdentity, resolveEnabledSkills } from './agent-setup.ts'
 import { LlmTraceRecorder } from './llm-trace.ts'
 import {
   TokenUsageRecorder,
@@ -95,7 +95,7 @@ import type { BotCreateInput, BotRecord, BotUpdatePatch } from './types.ts'
 import { botRecordSchema } from './schema.ts'
 
 export type { BotCreateInput, BotRecord, BotUpdatePatch, TriggerConfig } from './types.ts'
-export { buildBotAgentSetup, resolveEnabledSkills } from './agent-setup.ts'
+export { buildBotAgentSetup, renderIdentity, resolveEnabledSkills } from './agent-setup.ts'
 export type { EnabledSkillSummary } from './agent-setup.ts'
 
 /** Cordis plugin name. */
@@ -377,6 +377,14 @@ export class ChatBots extends Service {
       const workspaceDir = join(resolveDshHome(), 'workspace', 'agents', id)
       await mkdir(workspaceDir, { recursive: true })
       await bots.put(id, { ...bot, workspaceDir, updatedAt: Date.now() })
+    }
+    // 一次性回填：老好友只存了 provider（`chat-<modelId>` 路由），把模型唯一
+    // ID 反解出来写回记录，之后改模型的端点/模型名就不会让好友停留在旧值上。
+    for (const [id, bot] of bots.entries()) {
+      if (bot.modelId !== undefined) continue
+      const bound = modelIdFromRoute(bot.provider)
+      if (bound === undefined || this.models?.get(bound) === undefined) continue
+      await bots.put(id, { ...bot, modelId: bound })
     }
     this.registerHttp()
     // 一次性凭证镜像：把官方 DeepSeek 模型记录的 key 同步到共享
@@ -673,6 +681,8 @@ export class ChatBots extends Service {
       persona: source.persona,
       provider: source.provider,
       model: source.model,
+      // 模型绑定随配置一起复制：克隆体同样引用模型记录，而不是快照
+      ...(source.modelId !== undefined ? { modelId: source.modelId } : {}),
       ...(source.introduction !== undefined ? { introduction: source.introduction } : {}),
       ...(source.agentEnabled !== undefined ? { agentEnabled: source.agentEnabled } : {}),
       ...(source.enabledTools !== undefined ? { enabledTools: [...source.enabledTools] } : {}),
@@ -778,7 +788,9 @@ export class ChatBots extends Service {
     }
     await this.store.table('bots').put(id, next)
 
-    const modelChanged = sanitized.provider !== undefined || sanitized.model !== undefined
+    const modelChanged = sanitized.provider !== undefined
+      || sanitized.model !== undefined
+      || (sanitized.modelId !== undefined && sanitized.modelId !== current.modelId)
     const personaChanged = sanitized.persona !== undefined && sanitized.persona !== current.persona
     // Agent 开关在 setup（agent 级 tools.guard）中生效，切换必须重建 agent
     const effectiveAgentEnabled = current.agentEnabled ?? current.workspaceDir !== undefined
@@ -796,7 +808,7 @@ export class ChatBots extends Service {
         await this.rebuildAgent(id)
       } else if (personaChanged) {
         const handle = this.handles.get(id)
-        if (handle !== undefined) this.applyPersona(handle.agent, next)
+        if (handle !== undefined) this.applyIdentity(handle.agent, next)
       }
     }
     return next
@@ -863,7 +875,7 @@ export class ChatBots extends Service {
     if (existing !== undefined) return existing.agent
     const bot = this.get(id)
     if (bot === undefined) throw new Error(`chat-bots: bot "${id}" not found`)
-    const agentOptions = { provider: bot.provider, model: bot.model }
+    const agentOptions = this.resolveBotModel(bot)
     // Enabled-skill summaries are resolved up front: the setup callback must
     // stay synchronous, so the async registry lookup happens before creation.
     const skillSummaries = await resolveEnabledSkills(this.ctx, bot)
@@ -892,13 +904,44 @@ export class ChatBots extends Service {
     return handle.agent
   }
 
-  /** Swap the persona section of a live agent in place. */
-  private applyPersona(agent: Agent, bot: BotRecord): void {
+  /**
+   * The agent-facing model selection for one bot.
+   *
+   * Resolved from `modelId` whenever the referenced record still exists: the
+   * route is derived from the model's stable id and the endpoint model id from
+   * the record's current `modelName`, so editing a model (endpoint, provider,
+   * model name) is picked up without touching every bot that uses it.
+   *
+   * Falls back to the stored `provider`/`model` snapshot for legacy records
+   * whose model was deleted or never bound by id.
+   */
+  resolveBotModel(bot: BotRecord): { provider: string; model: string } {
+    const record = bot.modelId === undefined ? undefined : this.models?.get(bot.modelId)
+    if (record !== undefined) return { provider: routeIdFor(record.id), model: record.modelName }
+    return { provider: bot.provider, model: bot.model }
+  }
+
+  /**
+   * Rebuild every live agent bound to one model record.
+   *
+   * AgentOptions are fixed at creation, so a model edit (new endpoint / model
+   * id) only reaches an already-running companion through a rebuild; the
+   * durable session identity is preserved, so its memory survives.
+   */
+  private async rebuildAgentsUsingModel(modelId: string): Promise<void> {
+    for (const [botId, bot] of this.store.table('bots').entries()) {
+      if (bot.modelId !== modelId || !this.handles.has(botId)) continue
+      await this.rebuildAgent(botId)
+    }
+  }
+
+  /** Swap the identity section (name + persona) of a live agent in place. */
+  private applyIdentity(agent: Agent, bot: BotRecord): void {
     this.personaDispose.get(bot.id)?.()
     const dispose = agent.ctx.systemPrompt.section({
-      name: 'chat:persona',
+      name: 'chat:identity',
       order: 0,
-      text: bot.persona,
+      text: renderIdentity(bot),
     })
     this.personaDispose.set(bot.id, dispose)
   }
@@ -1535,6 +1578,8 @@ export class ChatBots extends Service {
         workspaceDir: typeof raw.workspaceDir === 'string' ? raw.workspaceDir : undefined,
         provider: typeof raw.provider === 'string' ? raw.provider : 'deepseek',
         model: typeof raw.model === 'string' ? raw.model : '',
+        // 模型唯一 ID：好友绑定的是这条模型记录，而不是当前的端点/模型名快照
+        modelId: typeof raw.modelId === 'string' && raw.modelId !== '' ? raw.modelId : undefined,
         trigger: raw.trigger === undefined ? undefined : raw.trigger as BotCreateInput['trigger'],
         enabledTools: strArray('enabledTools'),
         enabledSkills: strArray('enabledSkills'),
@@ -1605,7 +1650,14 @@ export class ChatBots extends Service {
             }
             await syncRoute(await this.servicesReady, record, record.apiKey)
             await mirrorDeepSeekCredential(await this.servicesReady, [record])
+            // 首个模型直接接管默认模型与通用模型：否则用户添加完第一个模型后
+            // 「默认/通用」两个标记都是空的，好友与群聊调度都无模型可用。
+            const isFirstModel = models.list().length === 0
             await models.put(record)
+            if (isFirstModel) {
+              await this.defaultModel?.set(record.id)
+              await this.groupJudge?.set(record.id)
+            }
             return json(res, 200, toFrontModel(record))
           }
 
@@ -1624,6 +1676,9 @@ export class ChatBots extends Service {
             await syncRoute(await this.servicesReady, record, record.apiKey)
             await mirrorDeepSeekCredential(await this.servicesReady, [...models.list(), record])
             await models.put(record)
+            // 绑定该模型的好友按 ID 引用它：端点/模型名改了必须重建 agent 才生效
+            // （AgentOptions 在创建时固定；保留会话身份，记忆不受影响）。
+            await this.rebuildAgentsUsingModel(record.id)
             return json(res, 200, toFrontModel(record))
           }
 
@@ -1942,7 +1997,10 @@ export class ChatBots extends Service {
           /** Bot record + the custom-model id bound to its provider route. */
           const enrich = (bot: BotRecord): Record<string, unknown> => ({
             ...bot,
-            modelId: this.models?.list().find(model => routeIdFor(model.id) === bot.provider)?.id ?? null,
+            // 优先用显式绑定的模型 ID；老记录从路由反解
+            modelId: bot.modelId
+              ?? this.models?.list().find(model => routeIdFor(model.id) === bot.provider)?.id
+              ?? null,
             // 显式开关优先；旧记录（无该字段）回退为按 workspaceDir 推导
             agentEnabled: bot.agentEnabled === undefined
               ? (bot.workspaceDir !== undefined ? 1 : 0)
