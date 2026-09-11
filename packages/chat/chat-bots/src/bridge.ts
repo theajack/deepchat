@@ -338,9 +338,16 @@ export function aggregateTurn(session: Session, turn: number, endedAt: number, b
         if (usage !== undefined) {
           // dsh usage 字段互斥：inputTokens 仅非缓存输入，缓存读/写单独计。
           // 旧 UI 的 prompt_tokens 语义 = 全部输入（含缓存），此处对齐。
-          promptTokens += usage.inputTokens + (usage.cacheReadTokens ?? 0) + (usage.cacheWriteTokens ?? 0)
+          //
+          // 一个 turn 可以包含多个 step（工具调用循环），每个 step 的 prompt
+          // 都是「完整历史 + 已有工具结果」。累加会把同一份历史重复计 N 次，
+          // 让上下文占用虚高数倍。取最大的那个 step 才是该 turn 结束时的
+          // 上下文占用（用 max 而非直接覆盖，避免末尾 step 漏报 usage 时把
+          // 结果清零）；输出没有重叠，累加。
+          const stepPrompt = usage.inputTokens + (usage.cacheReadTokens ?? 0) + (usage.cacheWriteTokens ?? 0)
+          if (stepPrompt > promptTokens) promptTokens = stepPrompt
           completionTokens += usage.outputTokens
-          cachedTokens += usage.cacheReadTokens ?? 0
+          cachedTokens = Math.max(cachedTokens, usage.cacheReadTokens ?? 0)
         }
         break
       }
@@ -402,9 +409,12 @@ export function aggregatePrompt(session: Session, promptSeq: number, botId: stri
     text += row.text
     segments.push(...row.segments)
     toolCalls.push(...row.toolCalls)
-    promptTokens += row.promptTokens
+    // 一次回复可能跨多个 turn（后续 turn 由工具结果触发）。每个 turn 的
+    // prompt 都含完整历史，累加会重复计数 —— 取最大的那个 turn 即该回复
+    // 结束时的上下文占用；输出与耗时无重叠，累加。
+    promptTokens = Math.max(promptTokens, row.promptTokens)
     completionTokens += row.completionTokens
-    cachedTokens += row.cachedTokens
+    cachedTokens = Math.max(cachedTokens, row.cachedTokens)
     durationMs += row.durationMs
     time = row.time
   }

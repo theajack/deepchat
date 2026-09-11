@@ -44,6 +44,13 @@ const isLlmTraceWindow = ref(window.location.hash.startsWith("#/llm-trace"));
 const booting = ref(false);
 
 /**
+ * 端口被别的后端（多为上一版残留的 dsh 宿主）占着：此时前端能连上端口，
+ * 但对面是旧版本的接口，请求会以 404 / 405 乱报。这种情况直接拦下来，
+ * 而不是让用户对着一堆莫名其妙的报错。
+ */
+const hostConflict = ref("");
+
+/**
  * 等待后端就绪。打包版宿主要加载 200+ 依赖包与全套插件，全新机器上冷启动
  * 可达 1~2 分钟——不等它的话首屏数据请求全部失败（"Load failed"），用户在
  * 这期间创建的好友/模型也会因请求被拒而丢失。
@@ -53,6 +60,13 @@ async function waitForBackend(timeoutMs: number): Promise<boolean> {
   while (Date.now() < deadline) {
     try {
       if (await invoke<boolean>("dsh_ready")) return true;
+      // 端口冲突（多为旧版 DeepChat 残留宿主占着 3180）：立即停下来提示，
+      // 不要等满 3 分钟，也不要让请求打到旧后端上。
+      const conflict = await invoke<string | null>("dsh_conflict");
+      if (conflict !== null) {
+        hostConflict.value = conflict;
+        return false;
+      }
     } catch {
       // 非 Tauri 环境（纯浏览器调试）没有这个命令：直接放行
       return true;
@@ -73,9 +87,20 @@ onMounted(async () => {
   const settings = useSettingsStore();
 
   messages.bindEvents();
+  // Rust 侧抢占端口失败 / 端口上是别的宿主时推这个事件
+  try {
+    const { listen } = await import("@tauri-apps/api/event");
+    await listen<{ detail?: string }>("dsh.conflict", (event) => {
+      hostConflict.value = event.payload?.detail ?? "";
+      booting.value = false;
+    });
+  } catch {
+    // 非 Tauri 环境没有事件系统
+  }
   booting.value = true;
   const ready = await waitForBackend(180_000);
   booting.value = false;
+  if (hostConflict.value !== "") return;
   if (!ready) {
     app.toast(t("app.backendTimeout"));
     return;
@@ -103,6 +128,15 @@ onMounted(async () => {
     <div v-if="booting" class="fixed inset-0 z-50 flex flex-col items-center justify-center gap-4 bg-ink-1">
       <span class="h-9 w-9 animate-spin rounded-full border-2 border-line border-t-accent"></span>
       <span class="text-[13px] text-mid">{{ t("app.booting") }}</span>
+    </div>
+    <!-- 后端端口被旧版残留进程占用：直接说明原因，避免用户对着一堆 404/405 -->
+    <div
+      v-else-if="hostConflict !== ''"
+      class="fixed inset-0 z-50 flex flex-col items-center justify-center gap-3 bg-ink-1 px-10 text-center"
+    >
+      <span class="text-[15px] font-medium text-hi">{{ t("app.hostConflict") }}</span>
+      <span class="max-w-[560px] text-[12px] leading-relaxed text-mid">{{ t("app.hostConflictHint") }}</span>
+      <span class="max-w-[560px] font-mono text-[11px] leading-relaxed break-all text-lo">{{ hostConflict }}</span>
     </div>
     <TitleBar />
     <!-- 无会话（ChatHeader 不渲染）时，Windows 窗口按钮由此兜底显示。

@@ -448,6 +448,34 @@ export class ChatBots extends Service {
     }
   }
 
+  /**
+   * `GET /chatapi/host` — 宿主身份回显。
+   *
+   * 桌面端启动时用它确认 3180 上应答的是不是本次拉起的宿主：端口被上一版
+   * 残留的 dsh 进程占着时，光看「TCP 能连上」会误判就绪，前端随后把请求
+   * 打到旧后端的接口上（新接口在旧后端不存在 → 一片 404 / 405）。
+   */
+  private registerHostEndpoint(): void {
+    this.ctx.webServer.register({
+      kind: 'prefix',
+      path: '/chatapi/host',
+      handler: (req, res) => {
+        if (req.method !== 'GET') {
+          res.writeHead(405, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ error: 'method not allowed' }))
+          return
+        }
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({
+          // 由桌面端经环境变量注入；独立运行 dsh 时为空串（不算匹配）
+          token: process.env.DEEPCHAT_HOST_TOKEN ?? '',
+          pid: process.pid,
+          host: '127.0.0.1:3180',
+        }))
+      },
+    })
+  }
+
   private registerSseEndpoint(): void {
     this.ctx.webServer.register({
       kind: 'prefix',
@@ -1144,6 +1172,7 @@ export class ChatBots extends Service {
 
   /** The `/chatapi/bots` HTTP surface. */
   private registerHttp(): void {
+    this.registerHostEndpoint()
     this.registerSseEndpoint()
     this.registerPersonaEndpoint()
 

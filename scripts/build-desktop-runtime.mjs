@@ -11,7 +11,7 @@
 // Windows 分支在这里实现同一套产物，因为打包机上不保证有 bash。
 
 import { execFileSync } from 'node:child_process'
-import { cpSync, existsSync, mkdirSync, readdirSync, realpathSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
+import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -58,12 +58,51 @@ async function stageNode() {
  * node-linker=hoisted：默认 pnpm 布局顶层全是符号链接，而 Tauri 拷贝 resources
  * 时会跳过符号链接，产物会是个空壳。
  */
+/**
+ * 仓库内各包 lib/ 的最新修改时间。
+ *
+ * 只按「构建产物是否存在」跳过部署是危险的：改了 chat 插件源码后重新打包，
+ * 前端（编译进二进制）是新的、部署闭包还是旧的，安装包就会出现「新前端 + 旧
+ * 后端」——新接口在旧后端上不存在，界面上一片 404 / 405。所以跳过条件必须
+ * 带上「部署之后没有任何 lib 再变过」。
+ */
+function newestLibMtime() {
+  let newest = 0
+  const scan = (dir) => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const path = join(dir, entry.name)
+      if (entry.isDirectory()) scan(path)
+      else newest = Math.max(newest, statSync(path).mtimeMs)
+    }
+  }
+  for (const group of readdirSync(join(repoRoot, 'packages'))) {
+    const groupDir = join(repoRoot, 'packages', group)
+    for (const entry of readdirSync(groupDir, { withFileTypes: true })) {
+      const libDir = join(groupDir, entry.name, 'lib')
+      if (entry.isDirectory() && existsSync(libDir)) scan(libDir)
+    }
+  }
+  for (const entry of readdirSync(join(repoRoot, 'apps'), { withFileTypes: true })) {
+    const libDir = join(repoRoot, 'apps', entry.name, 'lib')
+    if (entry.isDirectory() && existsSync(libDir)) scan(libDir)
+  }
+  return newest
+}
+
 function deployRuntime() {
   // 幂等：完整部署过的运行时直接复用，避免每次打包重跑上万文件的 deploy。
+  // 判定条件 = 部署产物存在 且 部署时记录的 lib 时间戳没有变化。
   const cliEntry = join(runtimeDir, 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js')
-  if (existsSync(cliEntry)) {
-    console.log('==> runtime already deployed (skipped)')
-    return
+  // 时间戳记在 target/ 下，不进 resources（不然会被打进 app bundle）
+  const stampFile = join(repoRoot, 'apps', 'desktop', 'src-tauri', 'target', 'deepchat-runtime.stamp')
+  const libMtime = newestLibMtime()
+  if (existsSync(cliEntry) && existsSync(stampFile)) {
+    const stamp = Number(readFileSync(stampFile, 'utf8').trim())
+    if (Number.isFinite(stamp) && stamp === libMtime) {
+      console.log('==> runtime already deployed (skipped)')
+      return
+    }
+    console.log('==> chat packages rebuilt since last deploy, re-deploying runtime')
   }
   console.log('==> deploying dsh runtime closure')
   if (existsSync(runtimeDir)) {
@@ -84,6 +123,8 @@ function deployRuntime() {
     ['--filter', 'deepchat-runtime', 'deploy', '--prod', '--legacy', '--config.node-linker=hoisted', runtimeDir],
     { cwd: repoRoot, stdio: 'inherit', shell: true },
   )
+  // 记下本次部署对应的 lib 时间戳，下次据此判断能否安全跳过
+  writeFileSync(stampFile, String(newestLibMtime()))
 }
 
 /**

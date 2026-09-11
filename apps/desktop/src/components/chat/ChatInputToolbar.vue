@@ -15,6 +15,7 @@ import { useMessagesStore } from "../../stores/messages";
 import { useBotsStore } from "../../stores/bots";
 import { useModelsStore } from "../../stores/models";
 import { getModelContextDefaults, parseContextTokens } from "../../data/modelContextDefaults";
+import { computeContextUsage } from "../../utils/contextUsage";
 import { t } from "../../i18n";
 
 interface ToolbarAction {
@@ -79,17 +80,10 @@ const ctxUsage = computed(() => {
   const ctxStr = model?.input_ctx || getModelContextDefaults(modelName)?.inputCtx || "";
   const total = parseContextTokens(ctxStr);
   if (!total) return null;
-  // 占用：当前会话最近一条 AI 消息的 prompt+completion（每次请求携带全部历史，近似当前上下文占用）
+  // 占用：以最近一条带 prompt usage 的 AI 消息为锚点，补上其后新增内容；
+  // 整会话无 usage 时按内容估算（详见 computeContextUsage）
   const list = conversations.activeId ? messages.byConv[conversations.activeId] ?? [] : [];
-  let used = 0;
-  for (let i = list.length - 1; i >= 0; i--) {
-    const m = list[i];
-    if (m.sender_type === "ai_bot") {
-      used = (m.prompt_tokens ?? 0) + (m.completion_tokens ?? 0);
-      if (used > 0) break;
-    }
-  }
-  return { used, total, modelName };
+  return { used: computeContextUsage(list), total, modelName };
 });
 
 /** 当前会话是否有 AI 正在输出内容（流式生成中），决定终止按钮显隐 */

@@ -4,6 +4,8 @@ export const zh: MessageDict = {
   // 启动
   'app.booting': '正在启动本地服务，首次启动可能需要一两分钟…',
   'app.backendTimeout': '本地服务启动超时，请关闭应用后重新打开重试',
+  'app.hostConflict': '本地服务端口被占用',
+  'app.hostConflictHint': '端口 3180 上运行着另一个后端进程（通常是旧版本 DeepChat 退出时残留的）。请退出所有 DeepChat 实例后重新打开应用；若仍失败，可在终端执行 lsof -ti tcp:3180 | xargs kill -9 再重试。',
   // 通用设置
   'general.theme': '主题外观',
   'general.themeDesc': '选择浅色、深色或跟随系统配色',

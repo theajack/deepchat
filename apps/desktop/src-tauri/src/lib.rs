@@ -50,11 +50,197 @@ fn setup_traffic_lights(window: &tauri::WebviewWindow) {
 /// dsh 宿主子进程句柄（`dsh --profile chat-agent`）
 struct DshState {
     child: Mutex<Option<Arc<Mutex<Child>>>>,
+    /// 本次启动的宿主身份令牌：只有它回显一致的宿主才算「我们的后端」。
+    token: String,
 }
 
 /// dsh host 监听地址（与 chat-agent bundle 的 webserver 配置一致）
 const DSH_HOST: &str = "127.0.0.1";
 const DSH_PORT: u16 = 3180;
+
+/// 端口冲突详情。冲突往往发生在 webview 就绪之前，事件会丢，所以同时存一份
+/// 供前端在启动等待期间轮询（`dsh_conflict` 命令）。
+#[derive(Default)]
+struct PortConflict(Mutex<Option<String>>);
+
+fn set_port_conflict(app: &AppHandle, detail: String) {
+    if let Some(state) = app.try_state::<PortConflict>() {
+        if let Ok(mut guard) = state.0.lock() {
+            if guard.is_none() {
+                *guard = Some(detail);
+            }
+        }
+    }
+}
+
+/// 宿主身份令牌（随机即可，仅用于区分「本次拉起的宿主」与「旧版残留宿主」）。
+fn new_instance_token() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let pid = u128::from(std::process::id());
+    let mix = nanos ^ (pid << 32) ^ pid.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    format!("dc{mix:032x}")
+}
+
+/// 端口 3180 是否有人监听。
+fn port_listening() -> bool {
+    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], DSH_PORT));
+    TcpStream::connect_timeout(&addr, Duration::from_millis(300)).is_ok()
+}
+
+/// 占用 3180 的监听进程 PID。
+fn listening_pids() -> Vec<u32> {
+    #[cfg(unix)]
+    {
+        let Ok(out) = Command::new("lsof")
+            .args(["-nP", &format!("-iTCP:{DSH_PORT}"), "-sTCP:LISTEN", "-t"])
+            .output()
+        else {
+            return Vec::new();
+        };
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .filter_map(|line| line.trim().parse::<u32>().ok())
+            .collect()
+    }
+    #[cfg(windows)]
+    {
+        let Ok(out) = Command::new("netstat").args(["-ano"]).output() else {
+            return Vec::new();
+        };
+        let needle = format!(":{DSH_PORT} ");
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .filter(|line| line.contains(&needle) && line.contains("LISTENING"))
+            .filter_map(|line| line.split_whitespace().last()?.parse::<u32>().ok())
+            .collect()
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        Vec::new()
+    }
+}
+
+/// 某个 PID 的完整命令行（拿不到则 None）。
+fn process_command_line(pid: u32) -> Option<String> {
+    #[cfg(unix)]
+    {
+        let out = Command::new("ps")
+            .args(["-p", &pid.to_string(), "-o", "command="])
+            .output()
+            .ok()?;
+        Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
+    }
+    #[cfg(windows)]
+    {
+        let out = Command::new("wmic")
+            .args([
+                "process",
+                "where",
+                &format!("processid={pid}"),
+                "get",
+                "commandline",
+            ])
+            .output()
+            .ok()?;
+        let text = String::from_utf8_lossy(&out.stdout);
+        let line = text
+            .lines()
+            .map(str::trim)
+            .find(|line| !line.is_empty() && !line.eq_ignore_ascii_case("commandline"))?;
+        Some(line.to_string())
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = pid;
+        None
+    }
+}
+
+/// 是否本项目拉起的 dsh 宿主（命令行同时含 dsh/bin.js 与 --profile）。
+fn looks_like_dsh_host(pid: u32) -> bool {
+    let Some(cmd) = process_command_line(pid) else {
+        return false;
+    };
+    let lower = cmd.to_lowercase();
+    (lower.contains("bin.js") || lower.contains("dsh")) && lower.contains("--profile")
+}
+
+/// 结束进程。
+fn kill_pid(pid: u32) {
+    #[cfg(unix)]
+    {
+        let _ = Command::new("kill")
+            .args(["-9", &pid.to_string()])
+            .status();
+    }
+    #[cfg(windows)]
+    {
+        let _ = Command::new("taskkill")
+            .args(["/F", "/PID", &pid.to_string()])
+            .status();
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = pid;
+    }
+}
+
+/// 启动前抢占 3180：残留的 dsh 宿主（应用被强杀、或旧版本没有退出回收）会一直
+/// 占着端口，新宿主绑不上就退化成「前端连到旧后端」——表现为 404 / 405 满天飞。
+/// 这里主动结束它；若占用者是无关进程则报错，不做沉默连接。
+fn reclaim_dsh_port() -> Result<(), String> {
+    if !port_listening() {
+        return Ok(());
+    }
+    let pids = listening_pids();
+    if pids.is_empty() {
+        return Err(format!("端口 {DSH_PORT} 已被占用，但无法确定占用进程"));
+    }
+    for pid in &pids {
+        if looks_like_dsh_host(*pid) {
+            eprintln!("[DeepChat] 端口 {DSH_PORT} 被残留的 dsh 宿主占用（pid {pid}），正在结束它");
+            kill_pid(*pid);
+        } else {
+            return Err(format!(
+                "端口 {DSH_PORT} 被其他程序占用（pid {pid}）：{}",
+                process_command_line(*pid).unwrap_or_default()
+            ));
+        }
+    }
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        if !port_listening() {
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    Err(format!("端口 {DSH_PORT} 在结束残留宿主后仍未释放"))
+}
+
+/// 向宿主索要身份令牌（`GET /chatapi/host`）；拿不到或非 200 则 None。
+fn probe_host_token() -> Option<String> {
+    use std::io::{Read, Write};
+    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], DSH_PORT));
+    let mut stream = TcpStream::connect_timeout(&addr, Duration::from_millis(500)).ok()?;
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(800)));
+    let _ = stream.set_write_timeout(Some(Duration::from_millis(800)));
+    let request = format!(
+        "GET /chatapi/host HTTP/1.1\r\nHost: {DSH_HOST}:{DSH_PORT}\r\nConnection: close\r\n\r\n"
+    );
+    stream.write_all(request.as_bytes()).ok()?;
+    let mut raw = Vec::new();
+    let _ = stream.read_to_end(&mut raw);
+    let text = String::from_utf8_lossy(&raw);
+    if !text.starts_with("HTTP/1.1 200") && !text.starts_with("HTTP/1.0 200") {
+        return None;
+    }
+    let body = text.split("\r\n\r\n").nth(1).unwrap_or("");
+    Some(body.split("\"token\":\"").nth(1)?.split('"').next()?.to_string())
+}
 
 /// 定位 dsh 仓库根目录：从当前目录向上寻找 apps/desktop
 fn resolve_repo_root() -> Option<PathBuf> {
@@ -283,7 +469,13 @@ fn resolve_dsh_command(app: &AppHandle) -> Option<(String, Vec<String>, PathBuf,
     resolve_dev_command()
 }
 
-fn spawn_dsh(app: &AppHandle) -> std::io::Result<Arc<Mutex<Child>>> {
+fn spawn_dsh(app: &AppHandle, token: &str) -> std::io::Result<Arc<Mutex<Child>>> {
+    // 先抢占 3180：残留的旧宿主不清理掉，后端就永远是新前端的「旧 API」。
+    if let Err(detail) = reclaim_dsh_port() {
+        set_port_conflict(app, detail.clone());
+        let _ = app.emit("dsh.conflict", json!({ "port": DSH_PORT, "detail": detail }));
+        return Err(std::io::Error::other(detail));
+    }
     let (program, args, cwd, runtime_dir) = resolve_dsh_command(app)
         .ok_or_else(|| std::io::Error::other("无法定位 dsh（先在仓库根目录执行 pnpm run build）"))?;
 
@@ -303,6 +495,8 @@ fn spawn_dsh(app: &AppHandle) -> std::io::Result<Arc<Mutex<Child>>> {
         .args(&args)
         .current_dir(&dsh_home)
         .env("DSH_HOME", &dsh_home)
+        // 宿主身份令牌：/chatapi/host 原样回显，用于确认 3180 上应答的就是本进程。
+        .env("DEEPCHAT_HOST_TOKEN", token)
         .stdin(Stdio::null());
     if let Some(runtime) = &runtime_dir {
         // 内置技能随包分发（resources/dsh/skills，与 runtime 目录同级）。
@@ -355,29 +549,57 @@ fn spawn_dsh(app: &AppHandle) -> std::io::Result<Arc<Mutex<Child>>> {
         std::thread::sleep(Duration::from_millis(500));
     });
 
-    // 就绪探测：轮询 TCP 端口，成功后通知前端。
+    // 就绪探测：不仅要端口通，还要宿主回显本次的令牌。
+    // 只看 TCP 的话，任何一种占着 3180 的旧宿主都会被误判成「已就绪」，
+    // 前端随即请求到旧后端的接口上。
     // 期限给足 3 分钟：打包版宿主要加载 200+ 依赖包 + 全套插件，
     // 全新机器冷启动实测 1~2 分钟，60 秒会误报超时。
     let ready = app.clone();
+    let expected = token.to_string();
     std::thread::spawn(move || {
         let deadline = Instant::now() + Duration::from_secs(180);
+        let mut hijacked = false;
         while Instant::now() < deadline {
-            if TcpStream::connect((DSH_HOST, DSH_PORT)).is_ok() {
-                let _ = ready.emit("dsh.ready", json!({ "url": format!("http://{DSH_HOST}:{DSH_PORT}") }));
-                return;
+            match probe_host_token() {
+                Some(found) if found == expected => {
+                    let _ = ready.emit(
+                        "dsh.ready",
+                        json!({ "url": format!("http://{DSH_HOST}:{DSH_PORT}") }),
+                    );
+                    return;
+                }
+                // 端口有应答但不是本次宿主：别沉默，直接告诉前端
+                Some(_) => hijacked = true,
+                None => {}
             }
             std::thread::sleep(Duration::from_millis(250));
         }
-        let _ = ready.emit("dsh.timeout", json!(null));
+        if hijacked {
+            let detail = format!("端口 {DSH_PORT} 上应答的不是本次启动的宿主（可能是旧版 DeepChat 残留进程）");
+            set_port_conflict(&ready, detail.clone());
+            let _ = ready.emit("dsh.conflict", json!({ "port": DSH_PORT, "detail": detail }));
+        } else {
+            let _ = ready.emit("dsh.timeout", json!(null));
+        }
     });
 
     Ok(child)
 }
 
-/// 查询 dsh host 是否就绪（前端启动时轮询用）
+/// 查询 dsh host 是否就绪（前端启动时轮询用）——同时校验宿主身份。
 #[tauri::command]
-fn dsh_ready() -> bool {
-    TcpStream::connect((DSH_HOST, DSH_PORT)).is_ok()
+fn dsh_ready(app: AppHandle) -> bool {
+    match app.try_state::<DshState>() {
+        Some(state) => probe_host_token().is_some_and(|found| found == state.token),
+        None => false,
+    }
+}
+
+/// 端口冲突详情（无冲突时返回 null）。冲突事件可能在 webview 就绪前就发出，
+/// 所以前端除订阅事件外，还要在启动等待期间轮询这个命令。
+#[tauri::command]
+fn dsh_conflict(state: tauri::State<PortConflict>) -> Option<String> {
+    state.0.lock().ok().and_then(|guard| guard.clone())
 }
 
 // ============ 浏览器 Tab 历史与导航控制 ============
@@ -573,10 +795,13 @@ pub fn run() {
                 }
             }
 
-            match spawn_dsh(app.handle()) {
+            app.manage(PortConflict::default());
+            let token = new_instance_token();
+            match spawn_dsh(app.handle(), &token) {
                 Ok(child) => {
                     app.manage(DshState {
                         child: Mutex::new(Some(child)),
+                        token,
                     });
                     eprintln!("[DeepChat] dsh 宿主进程已启动（--profile chat-agent）");
                 }
@@ -591,6 +816,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             dsh_ready,
+            dsh_conflict,
             open_devtools,
             browser_back,
             browser_forward,
@@ -618,6 +844,8 @@ pub fn run() {
         if let Some(child) = guard.as_ref() {
             if let Ok(mut child) = child.lock() {
                 let _ = child.kill();
+                // 必须 wait 回收：只 kill 不 wait 会留下僵尸，且退出时序不保证。
+                let _ = child.wait();
             }
         }
     });

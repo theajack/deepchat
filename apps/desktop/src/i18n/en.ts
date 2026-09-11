@@ -4,6 +4,8 @@ export const en: MessageDict = {
   // Boot
   'app.booting': 'Starting the local service — this can take a minute or two on first launch…',
   'app.backendTimeout': 'The local service failed to start in time. Please close and reopen the app.',
+  'app.hostConflict': 'The local service port is already in use',
+  'app.hostConflictHint': 'Another backend process is listening on port 3180 — usually a leftover from an older DeepChat version. Quit every DeepChat instance and reopen the app. If it still fails, run lsof -ti tcp:3180 | xargs kill -9 and retry.',
   // General settings
   'general.theme': 'Appearance',
   'general.themeDesc': 'Choose light, dark, or follow the system',

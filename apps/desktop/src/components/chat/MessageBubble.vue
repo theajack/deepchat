@@ -18,6 +18,7 @@ import { renderMarkdown, renderMarkdownStreamed } from "../../utils/markdown";
 import { openUrl } from "../../utils/browser";
 import { useAutoScroll } from "../../utils/useAutoScroll";
 import { getModelContextDefaults, parseContextTokens } from "../../data/modelContextDefaults";
+import { computeContextUsage } from "../../utils/contextUsage";
 import { t } from "../../i18n";
 import type { StreamSegment, ToolCall } from "../../stores/messages";
 import type { MessageAttachment } from "../../types";
@@ -408,18 +409,18 @@ const ctxUsage = computed(() => {
   const total = parseContextTokens(ctxStr);
   if (!total) return null;
   // 占用：本条消息的 prompt+completion（该次请求携带的上下文）；
-  // 流式中的消息尚无 usage，回退取同会话同 bot 最近一条已结算消息
-  let used = (props.item.promptTokens ?? 0) + (props.item.completionTokens ?? 0);
-  if (used <= 0) {
-    const list = props.item.conversationId ? messages.byConv[props.item.conversationId] ?? [] : [];
-    for (let i = list.length - 1; i >= 0; i--) {
-      const m = list[i];
-      if (m.sender_type === "ai_bot" && m.sender_id === props.item.botId) {
-        used = (m.prompt_tokens ?? 0) + (m.completion_tokens ?? 0);
-        if (used > 0) break;
-      }
-    }
-  }
+  // 流式中的消息尚无 usage，回退到「同会话同 bot 最近一次结算的上下文 +
+  // 其后新增内容」，无 usage 时按内容估算（详见 computeContextUsage）
+  const own = (props.item.promptTokens ?? 0) + (props.item.completionTokens ?? 0);
+  const used =
+    own > 0
+      ? own
+      : computeContextUsage(
+          props.item.conversationId
+            ? messages.byConv[props.item.conversationId] ?? []
+            : [],
+          props.item.botId,
+        );
   return { used, total, modelName };
 });
 
